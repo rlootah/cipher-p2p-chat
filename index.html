@@ -1,0 +1,2450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CIPHER · Encrypted P2P Channel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500&family=JetBrains+Mono:wght@300;400;500&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --dp-green:        #008755;
+    --dp-green-dark:   #005844;
+    --dp-green-bright: #26D07C;
+    --bg-0:    #0a0d0c;
+    --bg-1:    #0f1413;
+    --bg-2:    #141a18;
+    --bg-3:    #1a2220;
+    --line:    rgba(255,255,255,0.06);
+    --line-2:  rgba(0,135,85,0.25);
+    --text:    #e8ebea;
+    --text-mid:#9ba3a0;
+    --text-dim:#6b7270;
+    --danger:  #d4674e;
+    --warning: #d4a04e;
+    --success: var(--dp-green-bright);
+    --display:  'Cormorant Garamond', 'Times New Roman', serif;
+    --body:     'Inter', system-ui, -apple-system, sans-serif;
+    --mono:     'JetBrains Mono', 'Courier New', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%; background: var(--bg-0); color: var(--text);
+    font-family: var(--body); font-size: 14px; line-height: 1.5;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+  }
+  body::before {
+    content: ''; position: fixed; inset: 0;
+    background:
+      radial-gradient(ellipse 800px 400px at 20% 0%, rgba(0,135,85,0.08), transparent 60%),
+      radial-gradient(ellipse 600px 600px at 100% 100%, rgba(38,208,124,0.04), transparent 60%);
+    pointer-events: none; z-index: 0;
+  }
+  body::after {
+    content: ''; position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.018 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    pointer-events: none; z-index: 0; mix-blend-mode: overlay;
+  }
+  .app { position: relative; z-index: 1; height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+
+  /* ─────────── HEADER ─────────── */
+  header {
+    border-bottom: 1px solid var(--line); padding: 18px 28px;
+    display: flex; align-items: center; justify-content: space-between;
+    background: linear-gradient(180deg, rgba(0,135,85,0.04), transparent);
+    gap: 16px; flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .brand-mark {
+    width: 38px; height: 38px; border: 1px solid var(--line-2); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at 30% 30%, rgba(38,208,124,0.15), transparent 70%);
+  }
+  .brand-mark::before {
+    content: ''; width: 8px; height: 8px; background: var(--dp-green-bright);
+    border-radius: 50%; box-shadow: 0 0 12px var(--dp-green-bright);
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.4; transform: scale(0.85); }
+    50%      { opacity: 1;   transform: scale(1.1); }
+  }
+  .brand-name {
+    font-family: var(--display); font-size: 26px; font-weight: 400;
+    letter-spacing: 0.18em; line-height: 1;
+  }
+  .brand-sub {
+    font-family: var(--mono); font-size: 9px; color: var(--text-dim);
+    letter-spacing: 0.32em; margin-top: 4px; text-transform: uppercase;
+  }
+  .header-right { display: flex; align-items: center; gap: 12px; }
+
+  /* Peer pill (who you're talking to) */
+  .peer-pill {
+    display: none; align-items: center; gap: 8px;
+    padding: 6px 12px 6px 8px;
+    border: 1px solid var(--line); border-radius: 100px;
+    background: var(--bg-1);
+    font-family: var(--body); font-size: 12px; color: var(--text);
+  }
+  .peer-pill.connected { display: inline-flex; }
+  .peer-pill .peer-avatar {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--dp-green-dark), var(--dp-green-bright));
+    color: white; font-family: var(--display); font-size: 11px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .peer-pill .peer-name { font-weight: 500; }
+  .peer-pill .peer-trust {
+    font-family: var(--mono); font-size: 8px; letter-spacing: 0.15em;
+    color: var(--text-dim); text-transform: uppercase; margin-left: 4px;
+  }
+  .peer-pill.trusted .peer-trust { color: var(--dp-green-bright); }
+  .peer-pill.trusted .peer-trust::before { content: '✓ '; }
+  .status {
+    display: flex; align-items: center; gap: 10px; padding: 8px 16px;
+    border: 1px solid var(--line); border-radius: 100px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.15em;
+    text-transform: uppercase; background: var(--bg-1);
+  }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim);
+    transition: all 0.3s ease;
+  }
+  .status[data-state="connecting"] .status-dot { background: var(--warning); animation: blink 0.9s infinite; }
+  .status[data-state="connected"]  .status-dot { background: var(--success); box-shadow: 0 0 10px var(--success); }
+  .status[data-state="failed"]     .status-dot { background: var(--danger); }
+  @keyframes blink { 50% { opacity: 0.3; } }
+
+  /* ─────────── CALL PILL (in header) ─────────── */
+  .call-pill {
+    display: flex; align-items: center; gap: 10px;
+    border: 1px solid var(--line); border-radius: 100px;
+    padding: 4px 6px 4px 14px; background: var(--bg-1);
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.15em;
+    text-transform: uppercase; color: var(--text-mid);
+  }
+  .call-pill.active { border-color: var(--dp-green); color: var(--dp-green-bright); }
+  .call-pill .lvl {
+    display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; width: 22px;
+  }
+  .call-pill .lvl span {
+    width: 3px; background: var(--text-dim); border-radius: 1px;
+    transition: height 0.08s linear, background 0.2s ease;
+    height: 3px;
+  }
+  .call-pill.active .lvl span { background: var(--dp-green-bright); }
+  .call-btn {
+    border: none; border-radius: 100px; width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: all 0.2s ease; color: white;
+    background: var(--dp-green);
+  }
+  .call-btn svg { width: 14px; height: 14px; }
+  .call-btn.start:hover { background: var(--dp-green-dark); }
+  .call-btn.end { background: var(--danger); }
+  .call-btn.end:hover { background: #b8553f; }
+  .call-btn.mute {
+    background: transparent; color: var(--text-mid); border: 1px solid var(--line);
+  }
+  .call-btn.mute:hover { color: var(--text); border-color: var(--text-mid); }
+  .call-btn.mute.muted { background: var(--danger); color: white; border-color: var(--danger); }
+  .call-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* ─────────── INCOMING CALL BANNER ─────────── */
+  .call-banner {
+    position: fixed; top: 90px; left: 50%; transform: translateX(-50%) translateY(-30px);
+    background: var(--bg-2); border: 1px solid var(--dp-green); border-radius: 8px;
+    padding: 16px 22px; display: none; align-items: center; gap: 16px;
+    z-index: 90; opacity: 0; transition: all 0.3s ease;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6), 0 0 0 1px rgba(38,208,124,0.15);
+  }
+  .call-banner.show { display: flex; opacity: 1; transform: translateX(-50%) translateY(0); }
+  .call-banner .icon {
+    width: 36px; height: 36px; border-radius: 50%; background: var(--dp-green);
+    display: flex; align-items: center; justify-content: center; color: white;
+    animation: ring 1s ease-in-out infinite;
+  }
+  @keyframes ring {
+    0%, 100% { transform: rotate(0); }
+    20%, 60% { transform: rotate(-12deg); }
+    40%, 80% { transform: rotate(12deg); }
+  }
+  .call-banner .text {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.15em;
+    text-transform: uppercase; color: var(--text);
+  }
+  .call-banner .text small { color: var(--text-mid); font-size: 9px; display: block; margin-top: 2px; }
+
+  /* ─────────── MAIN LAYOUT ─────────── */
+  main {
+    display: grid; grid-template-columns: 380px 1fr;
+    height: 100%; overflow: hidden;
+  }
+
+  /* ─────────── HANDSHAKE PANEL ─────────── */
+  .handshake {
+    border-right: 1px solid var(--line); background: var(--bg-1);
+    overflow-y: auto; padding: 28px 24px;
+  }
+  .handshake::-webkit-scrollbar { width: 6px; }
+  .handshake::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 4px; }
+  .panel-title {
+    font-family: var(--display); font-size: 22px; font-weight: 400;
+    margin-bottom: 6px; letter-spacing: 0.04em;
+  }
+  .panel-subtitle { font-size: 12px; color: var(--text-mid); line-height: 1.6; margin-bottom: 24px; }
+
+  .role-toggle {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+    border: 1px solid var(--line); border-radius: 4px;
+    overflow: hidden; margin-bottom: 24px;
+  }
+  .role-toggle button {
+    background: transparent; border: none; color: var(--text-mid);
+    padding: 12px; font-family: var(--mono); font-size: 10px;
+    letter-spacing: 0.2em; text-transform: uppercase; cursor: pointer;
+    transition: all 0.2s ease; border-right: 1px solid var(--line);
+  }
+  .role-toggle button:last-child { border-right: none; }
+  .role-toggle button.active { background: var(--dp-green); color: white; }
+  .role-toggle button:not(.active):hover { background: var(--bg-2); color: var(--text); }
+
+  /* mic permission card at top */
+  .mic-card {
+    background: var(--bg-2); border: 1px solid var(--line);
+    border-left: 3px solid var(--dp-green); border-radius: 4px;
+    padding: 12px 14px; margin-bottom: 22px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .mic-card svg { width: 20px; height: 20px; color: var(--dp-green-bright); flex-shrink: 0; }
+  .mic-card .mic-text { flex: 1; }
+  .mic-card .mic-title {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--text);
+  }
+  .mic-card .mic-sub { font-size: 11px; color: var(--text-mid); margin-top: 4px; line-height: 1.5; }
+  .mic-card.granted { border-left-color: var(--dp-green-bright); }
+  .mic-card.granted svg { color: var(--dp-green-bright); }
+  .mic-card.denied { border-left-color: var(--danger); }
+  .mic-card.denied svg { color: var(--danger); }
+
+  /* Recent peers card — quick reconnect */
+  .recent-peers {
+    background: linear-gradient(135deg, rgba(0,135,85,0.12), rgba(38,208,124,0.04));
+    border: 1px solid var(--line-2); border-radius: 6px;
+    padding: 14px; margin-bottom: 16px;
+    display: none;
+  }
+  .recent-peers.show { display: block; }
+  .recent-peers-title {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--dp-green-bright);
+    margin-bottom: 10px;
+  }
+  .recent-peer-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px; background: var(--bg-1);
+    border: 1px solid var(--line); border-radius: 4px;
+    cursor: pointer; transition: all 0.15s ease;
+    margin-bottom: 6px;
+  }
+  .recent-peer-row:last-child { margin-bottom: 0; }
+  .recent-peer-row:hover {
+    border-color: var(--dp-green); background: var(--bg-2);
+    transform: translateX(2px);
+  }
+  .recent-peer-avatar {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--dp-green-dark), var(--dp-green-bright));
+    color: white; font-family: var(--display); font-size: 13px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .recent-peer-info { flex: 1; min-width: 0; }
+  .recent-peer-name {
+    font-size: 13px; color: var(--text); font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .recent-peer-meta {
+    font-family: var(--mono); font-size: 9px; color: var(--text-dim);
+    letter-spacing: 0.1em; margin-top: 2px;
+  }
+  .recent-peer-action {
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.15em;
+    color: var(--dp-green-bright); text-transform: uppercase;
+    flex-shrink: 0;
+  }
+
+  /* Paste-clipboard banner */
+  .clipboard-banner {
+    background: var(--bg-2); border: 1px solid var(--dp-green);
+    border-radius: 4px; padding: 10px 14px; margin-bottom: 16px;
+    display: none; align-items: center; gap: 10px;
+    animation: slideDown 0.3s ease;
+  }
+  .clipboard-banner.show { display: flex; }
+  @keyframes slideDown {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .clipboard-banner svg { width: 16px; height: 16px; color: var(--dp-green-bright); flex-shrink: 0; }
+  .clipboard-banner .cb-text {
+    flex: 1; font-size: 11px; color: var(--text);
+  }
+  .clipboard-banner .cb-text strong { color: var(--dp-green-bright); }
+
+  /* Identity card */
+  .identity-card {
+    background: var(--bg-2); border: 1px solid var(--line);
+    border-left: 3px solid var(--dp-green); border-radius: 4px;
+    padding: 12px 14px; margin-bottom: 16px;
+  }
+  .identity-card .id-row {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .identity-card svg { width: 18px; height: 18px; color: var(--dp-green-bright); flex-shrink: 0; }
+  .identity-card .id-text { flex: 1; min-width: 0; }
+  .identity-card .id-title {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--text); display: flex;
+    align-items: center; gap: 6px;
+  }
+  .identity-card .id-nickname {
+    font-family: var(--display); font-size: 18px; color: var(--text);
+    margin-top: 2px; font-weight: 500;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .identity-card .id-nickname.empty { color: var(--text-dim); font-style: italic; font-size: 14px; }
+  .identity-card .id-nickname-edit {
+    background: transparent; border: none; color: var(--text-dim);
+    cursor: pointer; padding: 2px; display: inline-flex; align-items: center;
+    transition: color 0.2s ease;
+  }
+  .identity-card .id-nickname-edit:hover { color: var(--dp-green-bright); }
+  .identity-card .id-nickname-edit svg { width: 12px; height: 12px; color: inherit; }
+  .identity-card .id-fingerprint {
+    font-family: var(--mono); font-size: 11px; color: var(--dp-green-bright);
+    margin-top: 4px; word-break: break-all; line-height: 1.4;
+  }
+  .identity-card .id-actions {
+    display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap;
+  }
+  .identity-card .id-mini-btn {
+    background: transparent; border: 1px solid var(--line);
+    color: var(--text-mid); font-family: var(--mono); font-size: 9px;
+    letter-spacing: 0.15em; text-transform: uppercase;
+    padding: 5px 9px; border-radius: 3px; cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .identity-card .id-mini-btn:hover {
+    color: var(--text); border-color: var(--text-mid);
+  }
+  .identity-card .id-mini-btn.danger:hover {
+    color: var(--danger); border-color: var(--danger);
+  }
+
+  /* Connection-quality bar */
+  .quality-bar {
+    display: inline-flex; align-items: flex-end; gap: 2px;
+    height: 12px; margin-left: 6px;
+  }
+  .quality-bar span {
+    width: 3px; background: var(--text-dim); border-radius: 1px;
+  }
+  .quality-bar span:nth-child(1) { height: 4px; }
+  .quality-bar span:nth-child(2) { height: 7px; }
+  .quality-bar span:nth-child(3) { height: 10px; }
+  .quality-bar.good span { background: var(--dp-green-bright); }
+  .quality-bar.warn span:nth-child(1),
+  .quality-bar.warn span:nth-child(2) { background: var(--warning); }
+  .quality-bar.poor span:nth-child(1) { background: var(--danger); }
+
+  /* Verification modal */
+  .verify-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+    display: none; align-items: center; justify-content: center;
+    z-index: 200; opacity: 0; transition: opacity 0.2s ease;
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  }
+  .verify-overlay.show { display: flex; opacity: 1; }
+  .verify-modal {
+    background: var(--bg-1); border: 1px solid var(--line-2);
+    border-radius: 8px; padding: 32px; max-width: 480px; width: 90%;
+    text-align: center;
+  }
+  .verify-modal h3 {
+    font-family: var(--display); font-size: 24px; font-weight: 400;
+    margin-bottom: 8px; letter-spacing: 0.04em;
+  }
+  .verify-modal p {
+    font-size: 12px; color: var(--text-mid); line-height: 1.7;
+    margin-bottom: 24px;
+  }
+  .verify-modal .fingerprint-display {
+    background: var(--bg-0); border: 1px solid var(--line);
+    padding: 18px; border-radius: 4px; margin-bottom: 24px;
+    font-family: var(--mono); font-size: 16px; color: var(--dp-green-bright);
+    letter-spacing: 0.18em; word-break: break-all; line-height: 1.6;
+  }
+  .verify-modal .fp-label {
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--text-dim); margin-bottom: 8px;
+  }
+  .verify-modal .verify-actions {
+    display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
+  }
+
+  .step { margin-bottom: 22px; opacity: 0.4; transition: opacity 0.4s ease; }
+  .step.active, .step.done { opacity: 1; }
+  .step-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .step-num {
+    width: 22px; height: 22px; border: 1px solid var(--line-2); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: 10px; color: var(--text-mid); flex-shrink: 0;
+  }
+  .step.done .step-num { background: var(--dp-green); border-color: var(--dp-green); color: white; }
+  .step.active .step-num { border-color: var(--dp-green-bright); color: var(--dp-green-bright); }
+  .step-label {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em;
+    color: var(--text-mid); text-transform: uppercase;
+  }
+
+  textarea.code {
+    width: 100%; min-height: 110px; background: var(--bg-0);
+    border: 1px solid var(--line); border-radius: 4px;
+    color: var(--dp-green-bright); font-family: var(--mono);
+    font-size: 10px; line-height: 1.5; padding: 12px;
+    resize: vertical; word-break: break-all; transition: border-color 0.2s ease;
+  }
+  textarea.code:focus { outline: none; border-color: var(--line-2); }
+  textarea.code::placeholder { color: var(--text-dim); font-style: italic; }
+
+  .btn {
+    background: transparent; color: var(--text);
+    border: 1px solid var(--line-2); padding: 10px 18px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em;
+    text-transform: uppercase; cursor: pointer; transition: all 0.2s ease;
+    border-radius: 3px; display: inline-flex; align-items: center; gap: 8px;
+  }
+  .btn:hover:not(:disabled) { background: var(--dp-green); border-color: var(--dp-green); color: white; }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .btn-primary { background: var(--dp-green); border-color: var(--dp-green); color: white; }
+  .btn-primary:hover:not(:disabled) { background: var(--dp-green-dark); border-color: var(--dp-green-dark); }
+  .btn-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .hint { font-size: 11px; color: var(--text-dim); margin-top: 8px; line-height: 1.5; font-style: italic; }
+
+  /* ─────────── CHAT PANEL ─────────── */
+  .chat {
+    display: grid; grid-template-rows: 1fr auto;
+    height: 100%; overflow: hidden; background: var(--bg-0);
+  }
+  .messages {
+    overflow-y: auto; padding: 28px 36px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .messages::-webkit-scrollbar { width: 6px; }
+  .messages::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 4px; }
+
+  .empty-state {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    text-align: center; color: var(--text-dim);
+  }
+  .empty-state .glyph {
+    font-family: var(--display); font-size: 80px; color: var(--dp-green-dark);
+    line-height: 1; margin-bottom: 18px; opacity: 0.5;
+  }
+  .empty-state h2 {
+    font-family: var(--display); font-weight: 400; font-size: 24px;
+    color: var(--text-mid); letter-spacing: 0.05em; margin-bottom: 8px;
+  }
+  .empty-state p { font-size: 12px; max-width: 340px; line-height: 1.7; }
+  .empty-state .security-note {
+    margin-top: 32px; padding: 14px 20px; border: 1px solid var(--line);
+    border-radius: 4px; font-family: var(--mono); font-size: 10px;
+    letter-spacing: 0.1em; color: var(--text-mid);
+    background: var(--bg-1); max-width: 420px;
+  }
+  .empty-state .security-note strong { color: var(--dp-green-bright); font-weight: 500; }
+
+  .msg {
+    max-width: 70%; padding: 10px 14px; border-radius: 4px;
+    font-size: 14px; line-height: 1.5; word-wrap: break-word;
+    animation: msgIn 0.25s ease-out; position: relative;
+  }
+  @keyframes msgIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .msg.outgoing {
+    align-self: flex-end; background: var(--dp-green-dark); color: white;
+    border-right: 2px solid var(--dp-green-bright);
+  }
+  .msg.incoming {
+    align-self: flex-start; background: var(--bg-2); color: var(--text);
+    border-left: 2px solid var(--dp-green);
+  }
+  .msg.system {
+    align-self: center; background: transparent; color: var(--text-dim);
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.15em;
+    text-transform: uppercase; padding: 4px 10px;
+    border-left: none; border-right: none;
+  }
+  .msg-meta {
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em;
+    opacity: 0.55; margin-top: 4px; text-transform: uppercase;
+  }
+  .msg.file { padding: 0; overflow: hidden; }
+  .msg.file .file-card {
+    padding: 12px 14px; display: flex; align-items: center; gap: 12px;
+  }
+  .msg.file .file-icon {
+    width: 36px; height: 36px; border: 1px solid currentColor; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--display); font-size: 18px; opacity: 0.7; flex-shrink: 0;
+  }
+  .msg.file .file-info { flex: 1; min-width: 0; }
+  .msg.file .file-name {
+    font-size: 13px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .msg.file .file-size { font-family: var(--mono); font-size: 10px; opacity: 0.6; margin-top: 2px; }
+  .msg.file .file-progress {
+    height: 2px; background: rgba(255,255,255,0.15); margin-top: 6px;
+    border-radius: 2px; overflow: hidden;
+  }
+  .msg.file .file-progress-bar {
+    height: 100%; background: var(--dp-green-bright); width: 0%;
+    transition: width 0.15s linear;
+  }
+  .msg.file .file-download {
+    color: inherit; text-decoration: none; font-family: var(--mono);
+    font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
+    border: 1px solid currentColor; padding: 5px 10px; border-radius: 3px;
+    transition: all 0.2s ease; flex-shrink: 0;
+  }
+  .msg.file .file-download:hover {
+    background: var(--dp-green-bright); color: var(--bg-0); border-color: var(--dp-green-bright);
+  }
+
+  /* call event in chat stream */
+  .msg.call {
+    align-self: center; background: var(--bg-2); border: 1px solid var(--line-2);
+    color: var(--text-mid); padding: 8px 14px; display: inline-flex;
+    align-items: center; gap: 10px; font-family: var(--mono);
+    font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
+  }
+  .msg.call svg { width: 12px; height: 12px; color: var(--dp-green-bright); }
+  .msg.call.ended svg { color: var(--text-dim); }
+
+  /* ─────────── COMPOSER ─────────── */
+  .composer {
+    border-top: 1px solid var(--line); padding: 18px 24px;
+    display: flex; align-items: center; gap: 12px; background: var(--bg-1);
+  }
+  .composer input[type="text"] {
+    flex: 1; background: var(--bg-0); border: 1px solid var(--line);
+    color: var(--text); padding: 12px 16px; border-radius: 4px;
+    font-family: var(--body); font-size: 14px; transition: border-color 0.2s ease;
+  }
+  .composer input[type="text"]:focus { outline: none; border-color: var(--line-2); }
+  .composer input[type="text"]:disabled { opacity: 0.4; }
+  .icon-btn {
+    background: transparent; border: 1px solid var(--line); color: var(--text-mid);
+    width: 42px; height: 42px; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: all 0.2s ease; flex-shrink: 0;
+  }
+  .icon-btn:hover:not(:disabled) {
+    border-color: var(--dp-green); color: var(--dp-green-bright);
+    background: rgba(0,135,85,0.06);
+  }
+  .icon-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .icon-btn svg { width: 18px; height: 18px; }
+
+  /* ─────────── TOAST ─────────── */
+  .toast {
+    position: fixed; bottom: 24px; left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--bg-2); border: 1px solid var(--line-2);
+    color: var(--text); padding: 12px 22px; border-radius: 4px;
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
+    text-transform: uppercase; opacity: 0;
+    transition: all 0.3s ease; z-index: 100; pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
+
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    .handshake { max-height: 50vh; border-right: none; border-bottom: 1px solid var(--line); }
+    .messages { padding: 18px; }
+    header { padding: 14px 18px; }
+    .brand-name { font-size: 20px; }
+    .status, .call-pill { padding: 6px 10px; font-size: 10px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ───────────────────────── HEADER ───────────────────────── -->
+  <header>
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <div>
+        <div class="brand-name">CIPHER</div>
+        <div class="brand-sub">Encrypted Peer Channel · v7.0</div>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <!-- Peer pill (visible when connected) -->
+      <div class="peer-pill" id="peerPill">
+        <div class="peer-avatar" id="peerAvatar">?</div>
+        <span class="peer-name" id="peerName">—</span>
+        <span class="peer-trust" id="peerTrust">unverified</span>
+      </div>
+
+      <!-- Call controls (visible when connected) -->
+      <div class="call-pill" id="callPill" style="display:none;">
+        <span id="callLabel">Idle</span>
+        <span class="lvl" id="callLevel">
+          <span></span><span></span><span></span><span></span><span></span>
+        </span>
+        <button class="call-btn mute" id="btnMute" title="Mute" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        </button>
+        <button class="call-btn start" id="btnCall" title="Start voice call">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+        </button>
+      </div>
+
+      <div class="status" id="status" data-state="disconnected">
+        <span class="status-dot"></span>
+        <span id="statusText">Disconnected</span>
+        <span class="quality-bar" id="qualityBar" style="display:none;">
+          <span></span><span></span><span></span>
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ───────────────────────── INCOMING CALL BANNER ───────────────────────── -->
+  <div class="call-banner" id="callBanner">
+    <div class="icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+    </div>
+    <div class="text">
+      Incoming Voice Call
+      <small>Peer is requesting voice channel</small>
+    </div>
+    <button class="btn btn-primary" id="btnAcceptCall">Accept</button>
+    <button class="btn" id="btnDeclineCall">Decline</button>
+  </div>
+
+  <!-- ───────────────────────── MAIN ───────────────────────── -->
+  <main>
+
+    <aside class="handshake">
+      <h1 class="panel-title">Manual Handshake</h1>
+      <p class="panel-subtitle">
+        Establish a direct peer-to-peer channel without any signaling server.
+        Exchange the codes below by any private medium of your choice.
+      </p>
+
+      <!-- Recent peers (quick reconnect) -->
+      <div class="recent-peers" id="recentPeers">
+        <div class="recent-peers-title">Reconnect to Known Peer</div>
+        <div id="recentPeersList"></div>
+      </div>
+
+      <!-- Clipboard auto-detect banner -->
+      <div class="clipboard-banner" id="clipboardBanner">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="4" rx="1" ry="1"/><path d="M5 6h14v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6z"/></svg>
+        <div class="cb-text">
+          <strong>Handshake code detected in clipboard.</strong>
+          Click to auto-fill and connect.
+        </div>
+        <button class="btn btn-primary" id="btnUseClipboard" style="padding:6px 12px; font-size:9px;">Use</button>
+      </div>
+
+      <!-- Identity card (persistent) -->
+      <div class="identity-card" id="identityCard">
+        <div class="id-row">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <div class="id-text">
+            <div class="id-title">Your Identity <span id="identityStatus"></span></div>
+            <div class="id-nickname empty" id="myNickname">
+              <span id="myNicknameText">Set a nickname</span>
+              <button class="id-nickname-edit" id="btnEditNickname" title="Edit nickname">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              </button>
+            </div>
+            <div class="id-fingerprint" id="identityFingerprint">Generating…</div>
+          </div>
+        </div>
+        <div class="id-actions">
+          <button class="id-mini-btn" id="btnVerifyId">Verify Peer</button>
+          <button class="id-mini-btn danger" id="btnRotateId">Rotate Identity</button>
+        </div>
+      </div>
+
+      <!-- Mic permission card -->
+      <div class="mic-card" id="micCard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
+        <div class="mic-text">
+          <div class="mic-title" id="micTitle">Microphone Required</div>
+          <div class="mic-sub" id="micSub">Grant access to enable voice calls. Chat works either way.</div>
+        </div>
+        <button class="btn" id="btnGrantMic">Grant</button>
+      </div>
+
+      <div class="role-toggle" role="tablist">
+        <button id="roleHost" class="active" data-role="host">Host</button>
+        <button id="roleJoiner" data-role="joiner">Joiner</button>
+      </div>
+
+      <!-- Host -->
+      <div id="hostPane">
+        <div class="step active" id="step-h1">
+          <div class="step-header">
+            <div class="step-num">1</div>
+            <div class="step-label">Generate Offer</div>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btnGenOffer">Generate Offer</button>
+          </div>
+          <textarea class="code" id="offerOut" readonly placeholder="Your offer code will appear here…" style="margin-top:10px;"></textarea>
+          <div class="btn-row">
+            <button class="btn" id="btnCopyOffer" disabled>Copy</button>
+          </div>
+          <div class="hint">Send this code to your peer through any private channel.</div>
+        </div>
+
+        <div class="step" id="step-h2">
+          <div class="step-header">
+            <div class="step-num">2</div>
+            <div class="step-label">Paste Answer</div>
+          </div>
+          <textarea class="code" id="answerIn" placeholder="Paste the answer code from your peer…"></textarea>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btnAcceptAnswer" disabled>Accept Answer</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Joiner -->
+      <div id="joinerPane" style="display:none;">
+        <div class="step active" id="step-j1">
+          <div class="step-header">
+            <div class="step-num">1</div>
+            <div class="step-label">Paste Offer</div>
+          </div>
+          <textarea class="code" id="offerIn" placeholder="Paste the offer code from the host…"></textarea>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btnGenAnswer">Generate Answer</button>
+          </div>
+        </div>
+
+        <div class="step" id="step-j2">
+          <div class="step-header">
+            <div class="step-num">2</div>
+            <div class="step-label">Send Answer</div>
+          </div>
+          <textarea class="code" id="answerOut" readonly placeholder="Your answer code will appear here…"></textarea>
+          <div class="btn-row">
+            <button class="btn" id="btnCopyAnswer" disabled>Copy</button>
+          </div>
+          <div class="hint">Return this code to the host. The channel will open automatically.</div>
+        </div>
+      </div>
+
+      <div class="btn-row" style="margin-top:24px;">
+        <button class="btn" id="btnReset">Reset Session</button>
+      </div>
+    </aside>
+
+    <!-- CHAT PANEL -->
+    <section class="chat">
+      <div class="messages" id="messages">
+        <div class="empty-state" id="emptyState">
+          <div class="glyph">∞</div>
+          <h2>Awaiting Channel</h2>
+          <p>Complete the handshake on the left to establish a direct, encrypted connection between you and your peer.</p>
+          <div class="security-note">
+            <strong>END-TO-END ENCRYPTED</strong><br>
+            Text, files, and voice are secured by WebRTC's mandatory DTLS-SRTP layer. Nothing passes through any server. The data flows directly between the two devices.
+          </div>
+        </div>
+      </div>
+
+      <div class="composer">
+        <button class="icon-btn" id="btnAttach" disabled title="Send file">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <input type="file" id="fileInput" style="display:none;" />
+        <input type="text" id="textInput" placeholder="Channel offline — complete handshake to begin…" disabled />
+        <button class="icon-btn" id="btnSend" disabled title="Send message">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- Hidden audio element for remote stream -->
+<audio id="remoteAudio" autoplay></audio>
+
+<!-- Verification modal -->
+<div class="verify-overlay" id="verifyOverlay">
+  <div class="verify-modal">
+    <h3>Verify Peer Identity</h3>
+    <p>Read these codes aloud to your peer over a trusted channel (phone call, in person). If both codes match on both screens, the connection is verified — no man-in-the-middle is possible.</p>
+    <div class="fp-label">Your Identity</div>
+    <div class="fingerprint-display" id="myFpDisplay">—</div>
+    <div class="fp-label">Peer's Identity <span id="peerSelfNickname" style="color:var(--text-mid); text-transform:none; letter-spacing:normal; font-family:var(--body); font-size:11px; margin-left:8px;"></span></div>
+    <div class="fingerprint-display" id="peerFpDisplay">—</div>
+    <div class="fp-label" style="margin-top:18px;">Save Peer As (optional local label)</div>
+    <input type="text" id="peerNicknameInput" placeholder="e.g. Ahmad — Lab"
+      style="width:100%; background:var(--bg-0); border:1px solid var(--line); color:var(--text);
+             padding:10px 12px; border-radius:4px; font-family:var(--body); font-size:14px;
+             margin-bottom:18px; transition:border-color 0.2s ease;" />
+    <div class="verify-actions">
+      <button class="btn btn-primary" id="btnConfirmVerify">Codes Match · Trust Peer</button>
+      <button class="btn" id="btnCloseVerify">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════════════
+   CIPHER · Serverless P2P Chat with Voice
+   ════════════════════════════════════════════════════════════════════════ */
+
+(() => {
+  'use strict';
+
+  /* ── DOM refs ─────────────────────────────────────────────── */
+  const $  = id => document.getElementById(id);
+  const els = {
+    status:        $('status'),
+    statusText:    $('statusText'),
+    qualityBar:    $('qualityBar'),
+    callPill:      $('callPill'),
+    callLabel:     $('callLabel'),
+    callLevel:     $('callLevel'),
+    btnCall:       $('btnCall'),
+    btnMute:       $('btnMute'),
+    callBanner:    $('callBanner'),
+    btnAcceptCall: $('btnAcceptCall'),
+    btnDeclineCall:$('btnDeclineCall'),
+    micCard:       $('micCard'),
+    micTitle:      $('micTitle'),
+    micSub:        $('micSub'),
+    btnGrantMic:   $('btnGrantMic'),
+    recentPeers:       $('recentPeers'),
+    recentPeersList:   $('recentPeersList'),
+    clipboardBanner:   $('clipboardBanner'),
+    btnUseClipboard:   $('btnUseClipboard'),
+    identityCard:        $('identityCard'),
+    identityStatus:      $('identityStatus'),
+    identityFingerprint: $('identityFingerprint'),
+    myNickname:          $('myNickname'),
+    myNicknameText:      $('myNicknameText'),
+    btnEditNickname:     $('btnEditNickname'),
+    peerPill:            $('peerPill'),
+    peerAvatar:          $('peerAvatar'),
+    peerName:            $('peerName'),
+    peerTrust:           $('peerTrust'),
+    peerSelfNickname:    $('peerSelfNickname'),
+    peerNicknameInput:   $('peerNicknameInput'),
+    btnVerifyId:         $('btnVerifyId'),
+    btnRotateId:         $('btnRotateId'),
+    verifyOverlay:    $('verifyOverlay'),
+    myFpDisplay:      $('myFpDisplay'),
+    peerFpDisplay:    $('peerFpDisplay'),
+    btnConfirmVerify: $('btnConfirmVerify'),
+    btnCloseVerify:   $('btnCloseVerify'),
+    roleHost:      $('roleHost'),
+    roleJoiner:    $('roleJoiner'),
+    hostPane:      $('hostPane'),
+    joinerPane:    $('joinerPane'),
+    btnGenOffer:   $('btnGenOffer'),
+    offerOut:      $('offerOut'),
+    btnCopyOffer:  $('btnCopyOffer'),
+    answerIn:      $('answerIn'),
+    btnAcceptAnswer: $('btnAcceptAnswer'),
+    offerIn:       $('offerIn'),
+    btnGenAnswer:  $('btnGenAnswer'),
+    answerOut:     $('answerOut'),
+    btnCopyAnswer: $('btnCopyAnswer'),
+    btnReset:      $('btnReset'),
+    messages:      $('messages'),
+    emptyState:    $('emptyState'),
+    textInput:     $('textInput'),
+    btnSend:       $('btnSend'),
+    btnAttach:     $('btnAttach'),
+    fileInput:     $('fileInput'),
+    remoteAudio:   $('remoteAudio'),
+    toast:         $('toast'),
+    'step-h1': $('step-h1'),
+    'step-h2': $('step-h2'),
+    'step-j1': $('step-j1'),
+    'step-j2': $('step-j2'),
+  };
+
+  /* ── State ────────────────────────────────────────────────── */
+  let pc        = null;          // RTCPeerConnection
+  let dc        = null;          // RTCDataChannel
+  let role      = 'host';
+  const incomingFiles = new Map();
+
+  // Voice state
+  let micStream = null;
+  let audioSender = null;
+  let audioTransceiver = null;
+  let inCall = false;
+  let isMuted = false;
+  let audioContext = null;
+  let analyser = null;
+  let levelAnimId = null;
+  let micPermission = 'unknown';
+
+  // Persistent identity (Level 2)
+  let myIdentity = null;          // { keyPair, fingerprint } — survives reload
+  let myNickname = '';            // my own nickname (persists in IndexedDB)
+  let peerIdentityFp = null;      // fingerprint of peer in current session
+  let peerSelfNickname = null;    // what peer calls themselves (sent via signed handshake)
+  let trustedPeers = new Map();   // fingerprint -> { nickname?, lastSeen, verified }
+  let pendingPeerHandshake = null;
+
+  // Resilience (Level 1)
+  let keepaliveTimer = null;
+  let wakeLock = null;
+  let qualityTimer = null;
+  let lastPeerActivity = Date.now();
+  let iceRestartInProgress = false;
+
+  const RTC_CONFIG = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' }
+    ]
+  };
+
+  /* ── UI helpers ──────────────────────────────────────────── */
+  const setStatus = (state, text) => {
+    els.status.dataset.state = state;
+    els.statusText.textContent = text;
+  };
+  const setStep = (id, state) => {
+    const el = els[id]; if (!el) return;
+    el.classList.remove('active', 'done');
+    if (state === 'active') el.classList.add('active');
+    if (state === 'done')   el.classList.add('done');
+  };
+  let toastTimer;
+  const toast = (msg, isError = false) => {
+    els.toast.textContent = msg;
+    els.toast.classList.toggle('error', isError);
+    els.toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => els.toast.classList.remove('show'), 2400);
+  };
+  const fmtSize = bytes => {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+    return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  };
+  const fmtTime = d => {
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  };
+  const escapeHtml = s => s.replace(/[&<>"']/g, c =>
+    ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c])
+  );
+
+  /* ── Compress / decompress SDP ────────────────────────────── */
+  const compressToBase64 = async (str) => {
+    const bytes = new TextEncoder().encode(str);
+    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'));
+    const buf = await new Response(stream).arrayBuffer();
+    let bin = '';
+    const u8 = new Uint8Array(buf);
+    for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+    return btoa(bin);
+  };
+  const decompressFromBase64 = async (b64) => {
+    const bin = atob(b64.trim());
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    const stream = new Blob([u8]).stream().pipeThrough(new DecompressionStream('gzip'));
+    const buf = await new Response(stream).arrayBuffer();
+    return new TextDecoder().decode(buf);
+  };
+  const encodeSDP = async (desc) => compressToBase64(JSON.stringify({ t: desc.type, s: desc.sdp }));
+  const decodeSDP = async (code) => {
+    const { t, s } = JSON.parse(await decompressFromBase64(code));
+    return { type: t, sdp: s };
+  };
+
+  /* ════════════════════════════════════════════════════════════════════
+     PERSISTENT IDENTITY (Level 2)
+     We generate an Ed25519-style keypair (using ECDSA P-256 since Ed25519
+     is not yet supported on Safari for WebCrypto). The keypair is stored
+     in IndexedDB. We use it to SIGN the WebRTC SDP fingerprint, so peers
+     can verify "this is the same identity I trusted last time" even
+     though the underlying DTLS keys are ephemeral per session.
+     ════════════════════════════════════════════════════════════════════ */
+
+  const DB_NAME = 'cipher-id';
+  const DB_VERSION = 1;
+  const STORE_ID = 'identity';
+  const STORE_PEERS = 'peers';
+
+  const openDB = () => new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE_ID))    db.createObjectStore(STORE_ID);
+      if (!db.objectStoreNames.contains(STORE_PEERS)) db.createObjectStore(STORE_PEERS);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+
+  const idbGet = async (store, key) => {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(store, 'readonly');
+      const r = tx.objectStore(store).get(key);
+      r.onsuccess = () => res(r.result);
+      r.onerror   = () => rej(r.error);
+    });
+  };
+  const idbSet = async (store, key, val) => {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(store, 'readwrite');
+      const r = tx.objectStore(store).put(val, key);
+      r.onsuccess = () => res();
+      r.onerror   = () => rej(r.error);
+    });
+  };
+  const idbDel = async (store, key) => {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(store, 'readwrite');
+      const r = tx.objectStore(store).delete(key);
+      r.onsuccess = () => res();
+      r.onerror   = () => rej(r.error);
+    });
+  };
+  const idbAll = async (store) => {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const out = [];
+      const tx = db.transaction(store, 'readonly');
+      const cursor = tx.objectStore(store).openCursor();
+      cursor.onsuccess = (e) => {
+        const c = e.target.result;
+        if (c) { out.push({ key: c.key, value: c.value }); c.continue(); }
+        else res(out);
+      };
+      cursor.onerror = () => rej(cursor.error);
+    });
+  };
+
+  // base64url helpers for compact JSON-safe encoding
+  const b64uEncode = (buf) => {
+    const u8 = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+    return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  };
+  const b64uDecode = (s) => {
+    s = s.replace(/-/g,'+').replace(/_/g,'/');
+    while (s.length % 4) s += '=';
+    const bin = atob(s);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8.buffer;
+  };
+
+  // Hash a public key into a short displayable fingerprint (12 hex bytes = 24 chars)
+  const computeFingerprint = async (publicKey) => {
+    const raw = await crypto.subtle.exportKey('raw', publicKey);
+    const hash = await crypto.subtle.digest('SHA-256', raw);
+    const u8 = new Uint8Array(hash).slice(0, 12);
+    return Array.from(u8).map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(':');
+  };
+
+  // Format fingerprint for human readability: groups of 4 chars
+  const formatFp = (fp) => fp ? fp.match(/.{1,4}/g).join(' ') : '—';
+
+  // Load identity from IndexedDB or generate a fresh one
+  const loadOrCreateIdentity = async () => {
+    try {
+      const stored = await idbGet(STORE_ID, 'main');
+      if (stored && stored.publicJwk && stored.privateJwk) {
+        const publicKey = await crypto.subtle.importKey(
+          'jwk', stored.publicJwk,
+          { name: 'ECDSA', namedCurve: 'P-256' },
+          true, ['verify']
+        );
+        const privateKey = await crypto.subtle.importKey(
+          'jwk', stored.privateJwk,
+          { name: 'ECDSA', namedCurve: 'P-256' },
+          false, ['sign']
+        );
+        const fp = await computeFingerprint(publicKey);
+        myIdentity = { keyPair: { publicKey, privateKey }, fingerprint: fp, publicJwk: stored.publicJwk };
+        myNickname = stored.nickname || '';
+        return;
+      }
+    } catch (err) { console.warn('identity load failed', err); }
+
+    // Generate new
+    const keyPair = await crypto.subtle.generateKey(
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      true, ['sign', 'verify']
+    );
+    const publicJwk  = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+    const privateJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey);
+    await idbSet(STORE_ID, 'main', { publicJwk, privateJwk, nickname: '', created: Date.now() });
+    const fp = await computeFingerprint(keyPair.publicKey);
+    myIdentity = { keyPair, fingerprint: fp, publicJwk };
+    myNickname = '';
+  };
+
+  const saveMyNickname = async (nickname) => {
+    myNickname = (nickname || '').trim().slice(0, 40); // cap length
+    try {
+      const stored = await idbGet(STORE_ID, 'main');
+      if (stored) {
+        stored.nickname = myNickname;
+        await idbSet(STORE_ID, 'main', stored);
+      }
+    } catch (err) { console.warn('nickname save failed', err); }
+    updateIdentityUI();
+  };
+
+  const rotateIdentity = async () => {
+    if (!confirm('Rotate identity?\n\nAll peers who trusted you previously will see you as a new, unverified identity. They will need to re-verify your fingerprint.')) return;
+    await idbDel(STORE_ID, 'main');
+    // Also clear trusted peers — they trusted the OLD you
+    const all = await idbAll(STORE_PEERS);
+    for (const { key } of all) await idbDel(STORE_PEERS, key);
+    trustedPeers.clear();
+    myIdentity = null;
+    await loadOrCreateIdentity();
+    updateIdentityUI();
+    toast('Identity rotated');
+  };
+
+  const loadTrustedPeers = async () => {
+    const all = await idbAll(STORE_PEERS);
+    trustedPeers.clear();
+    for (const { key, value } of all) trustedPeers.set(key, value);
+  };
+
+  const trustPeer = async (fingerprint, nickname) => {
+    const existing = trustedPeers.get(fingerprint) || {};
+    const entry = {
+      fingerprint,
+      nickname: (nickname ?? existing.nickname ?? '').trim().slice(0, 40),
+      lastSeen: Date.now(),
+      verified: true,
+    };
+    trustedPeers.set(fingerprint, entry);
+    await idbSet(STORE_PEERS, fingerprint, entry);
+  };
+
+  // Resolve display name for the current peer:
+  // 1. Local label I gave them (in trustedPeers) — wins
+  // 2. Their self-declared nickname (from signed handshake)
+  // 3. Short fingerprint as fallback
+  const peerDisplayName = () => {
+    if (!peerIdentityFp) return null;
+    const trusted = trustedPeers.get(peerIdentityFp);
+    if (trusted?.nickname) return trusted.nickname;
+    if (peerSelfNickname) return peerSelfNickname;
+    return peerIdentityFp.slice(0, 11); // "AA:BB:CC:DD"
+  };
+
+  // Display name for an arbitrary trusted peer record
+  const trustedPeerDisplayName = (p) => {
+    if (p.nickname) return p.nickname;
+    return p.fingerprint.slice(0, 11);
+  };
+
+  // Format "last seen" as a friendly relative time
+  const fmtRelative = (ts) => {
+    if (!ts) return 'never';
+    const diff = Date.now() - ts;
+    if (diff < 60000)         return 'just now';
+    if (diff < 3600000)       return Math.floor(diff / 60000) + 'm ago';
+    if (diff < 86400000)      return Math.floor(diff / 3600000) + 'h ago';
+    if (diff < 604800000)     return Math.floor(diff / 86400000) + 'd ago';
+    return Math.floor(diff / 604800000) + 'w ago';
+  };
+
+  // Render the "reconnect to known peer" card
+  const renderRecentPeers = () => {
+    const sorted = Array.from(trustedPeers.values())
+      .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0))
+      .slice(0, 5); // top 5 most recent
+
+    if (sorted.length === 0) {
+      els.recentPeers.classList.remove('show');
+      return;
+    }
+
+    els.recentPeers.classList.add('show');
+    els.recentPeersList.innerHTML = '';
+
+    for (const peer of sorted) {
+      const name = trustedPeerDisplayName(peer);
+      const initial = (name.match(/[A-Za-z\u0600-\u06FF]/) || [name[0] || '?'])[0].toUpperCase();
+      const row = document.createElement('div');
+      row.className = 'recent-peer-row';
+      row.innerHTML = `
+        <div class="recent-peer-avatar">${initial}</div>
+        <div class="recent-peer-info">
+          <div class="recent-peer-name">${escapeHtml(name)}</div>
+          <div class="recent-peer-meta">${peer.fingerprint.slice(0, 14)} · ${fmtRelative(peer.lastSeen)}</div>
+        </div>
+        <div class="recent-peer-action">Reconnect →</div>
+      `;
+      row.addEventListener('click', () => startReconnectTo(peer));
+      els.recentPeersList.appendChild(row);
+    }
+  };
+
+  // One-click reconnect: jump to Host role, auto-generate offer, auto-copy to clipboard
+  const startReconnectTo = async (peer) => {
+    setRole('host');
+    // Ensure we're scrolled into view so user sees what's happening
+    els.btnGenOffer.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    toast(`Generating offer for ${trustedPeerDisplayName(peer)}…`);
+    // Trigger the existing offer-generation flow
+    els.btnGenOffer.click();
+    // After offer is generated (code appears in textarea), auto-copy to clipboard
+    const waitForOffer = async () => {
+      for (let i = 0; i < 50; i++) {  // up to 10 seconds
+        await new Promise(r => setTimeout(r, 200));
+        if (els.offerOut.value && els.offerOut.value.length > 100) {
+          try {
+            await navigator.clipboard.writeText(els.offerOut.value);
+            toast('Offer copied — paste to peer (WhatsApp, Signal, etc)');
+            // Start watching clipboard for the peer's answer
+            startClipboardWatcher('answer');
+          } catch {
+            toast('Offer ready — click Copy then paste to peer');
+          }
+          return;
+        }
+      }
+    };
+    waitForOffer();
+  };
+
+  /* ── Clipboard auto-detect ────────────────────────────────
+     If the user opens the app with a handshake code already on their
+     clipboard (e.g. they copied it from WhatsApp), prompt to use it.
+     This skips the manual paste step. Requires clipboard-read permission
+     which browsers prompt for on first access. ─────────────────────── */
+  const detectClipboardHandshake = async () => {
+    if (!navigator.clipboard || !navigator.clipboard.readText) return;
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text || text.length < 100 || text.length > 10000) return;
+      // Quick heuristic: signed handshakes are base64 text
+      if (!/^[A-Za-z0-9+/=\r\n]+$/.test(text.trim())) return;
+      // Deep check: try to verify signature (won't throw until end)
+      try {
+        await verifySignedHandshake(text);
+      } catch { return; } // not a valid handshake, quietly ignore
+      // Looks like a real handshake — offer to use it
+      els.clipboardBanner.classList.add('show');
+      els.btnUseClipboard.onclick = () => {
+        els.clipboardBanner.classList.remove('show');
+        // Decide if it's an offer (we'd be joiner) or answer (we'd be host continuation)
+        // Heuristic: we're probably the joiner receiving an offer
+        setRole('joiner');
+        els.offerIn.value = text;
+        // Trigger the auto-accept flow
+        els.offerIn.dispatchEvent(new Event('input'));
+        els.btnGenAnswer.click();
+      };
+    } catch (err) {
+      // Clipboard access denied or unsupported — silent fail
+    }
+  };
+
+  /* ── Clipboard watcher ─────────────────────────────────────
+     After generating an offer or answer, poll the clipboard every 2s.
+     When the peer's reply appears, auto-apply it and connect.
+     Stops automatically once the channel is open or on timeout. ──── */
+  let clipboardWatcherTimer = null;
+  let clipboardLastSeen = '';
+
+  const stopClipboardWatcher = () => {
+    if (clipboardWatcherTimer) {
+      clearInterval(clipboardWatcherTimer);
+      clipboardWatcherTimer = null;
+    }
+  };
+
+  // expecting: 'offer' (we're joiner, waiting for peer's offer to paste)
+  //            'answer' (we're host, waiting for peer's answer to paste)
+  const startClipboardWatcher = (expecting) => {
+    stopClipboardWatcher();
+    if (!navigator.clipboard || !navigator.clipboard.readText) return;
+
+    // Seed: remember current clipboard so we only react to NEW content
+    navigator.clipboard.readText().then(t => { clipboardLastSeen = t || ''; }).catch(()=>{});
+
+    let attempts = 0;
+    const MAX_ATTEMPTS = 150; // 5 minutes at 2s interval
+
+    clipboardWatcherTimer = setInterval(async () => {
+      attempts++;
+      if (attempts > MAX_ATTEMPTS) {
+        stopClipboardWatcher();
+        return;
+      }
+      // Stop if we're already connected
+      if (dc && dc.readyState === 'open') {
+        stopClipboardWatcher();
+        return;
+      }
+      try {
+        const text = (await navigator.clipboard.readText()).trim();
+        if (!text || text === clipboardLastSeen) return;
+        if (text.length < 100 || text.length > 10000) return;
+        if (!/^[A-Za-z0-9+/=\r\n]+$/.test(text)) return;
+
+        // Try to verify it's a valid signed handshake
+        let verified;
+        try { verified = await verifySignedHandshake(text); }
+        catch { return; }
+
+        // Is this from a trusted peer? (Belt-and-suspenders: only auto-apply trusted)
+        if (!verified.isTrusted) return;
+
+        clipboardLastSeen = text;
+
+        if (expecting === 'answer') {
+          // We're host — paste this as the answer
+          els.answerIn.value = text;
+          els.answerIn.dispatchEvent(new Event('input'));
+          toast('Peer answer received — connecting…');
+          stopClipboardWatcher();
+        } else if (expecting === 'offer') {
+          // We're joiner — paste this as the offer
+          setRole('joiner');
+          els.offerIn.value = text;
+          els.offerIn.dispatchEvent(new Event('input'));
+          toast('Peer offer received — answering…');
+          stopClipboardWatcher();
+        }
+      } catch {
+        // Clipboard read failed (permission or other) — silent
+      }
+    }, 2000);
+  };
+
+  // Avatar initial: first letter of display name, uppercase
+  const peerInitial = () => {
+    const name = peerDisplayName();
+    if (!name) return '?';
+    const m = name.match(/[A-Za-z\u0600-\u06FF]/); // include Arabic
+    return (m ? m[0] : name[0]).toUpperCase();
+  };
+
+  const updatePeerPillUI = () => {
+    if (!peerIdentityFp) {
+      els.peerPill.classList.remove('connected', 'trusted');
+      return;
+    }
+    els.peerPill.classList.add('connected');
+    const trusted = trustedPeers.has(peerIdentityFp);
+    els.peerPill.classList.toggle('trusted', trusted);
+    els.peerName.textContent = peerDisplayName();
+    els.peerAvatar.textContent = peerInitial();
+    els.peerTrust.textContent = trusted ? 'Verified' : 'Unverified';
+  };
+
+  const updateIdentityUI = () => {
+    if (!myIdentity) {
+      els.identityFingerprint.textContent = 'Generating…';
+      els.identityStatus.textContent = '';
+      return;
+    }
+    els.identityFingerprint.textContent = formatFp(myIdentity.fingerprint);
+    els.identityStatus.textContent = '';
+    if (myNickname) {
+      els.myNicknameText.textContent = myNickname;
+      els.myNickname.classList.remove('empty');
+    } else {
+      els.myNicknameText.textContent = 'Set a nickname';
+      els.myNickname.classList.add('empty');
+    }
+  };
+
+  // Sign the SDP fingerprint with our identity key, so peer can verify
+  // we are the same identity they may have talked to before. Nickname is
+  // included in the signed payload so it can't be tampered with in transit.
+  const buildSignedHandshake = async (sdpCode) => {
+    if (!myIdentity) throw new Error('No identity');
+    const payload = {
+      sdp: sdpCode,
+      idFp: myIdentity.fingerprint,
+      idPub: myIdentity.publicJwk,
+      nick: myNickname || undefined,
+      ts: Date.now(),
+    };
+    const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
+    const signature = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      myIdentity.keyPair.privateKey,
+      payloadBytes
+    );
+    return compressToBase64(JSON.stringify({
+      p: payload,
+      s: b64uEncode(signature),
+    }));
+  };
+
+  const verifySignedHandshake = async (compactCode) => {
+    const obj = JSON.parse(await decompressFromBase64(compactCode));
+    const { p: payload, s: sigB64 } = obj;
+    if (!payload || !sigB64) throw new Error('Malformed handshake');
+
+    const peerPubKey = await crypto.subtle.importKey(
+      'jwk', payload.idPub,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      true, ['verify']
+    );
+    const computedFp = await computeFingerprint(peerPubKey);
+    if (computedFp !== payload.idFp) throw new Error('Fingerprint mismatch');
+
+    const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
+    const valid = await crypto.subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      peerPubKey,
+      b64uDecode(sigB64),
+      payloadBytes
+    );
+    if (!valid) throw new Error('Invalid signature');
+
+    return {
+      sdpCode: payload.sdp,
+      peerFp: payload.idFp,
+      peerNick: payload.nick || null,
+      isTrusted: trustedPeers.has(payload.idFp),
+    };
+  };
+
+  /* ════════════════════════════════════════════════════════════════════
+     RESILIENCE (Level 1)
+     Keepalive · Wake Lock · ICE restart · Quality monitoring
+     ════════════════════════════════════════════════════════════════════ */
+
+  // Keepalive: tiny ping every 20s prevents NAT timeout (typically 30s on mobile)
+  const startKeepalive = () => {
+    stopKeepalive();
+    keepaliveTimer = setInterval(() => {
+      if (dc && dc.readyState === 'open') {
+        try { dc.send(JSON.stringify({ k: 'ping', ts: Date.now() })); } catch {}
+      }
+      // If we haven't heard from peer in 60s, attempt ICE restart
+      if (Date.now() - lastPeerActivity > 60000 && pc && !iceRestartInProgress) {
+        attemptIceRestart();
+      }
+    }, 20000);
+  };
+  const stopKeepalive = () => {
+    if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+  };
+
+  // Wake Lock: prevents screen sleep on mobile while tab is foregrounded
+  const acquireWakeLock = async () => {
+    if (!('wakeLock' in navigator)) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch (err) { console.warn('wake lock failed', err); }
+  };
+  const releaseWakeLock = async () => {
+    if (wakeLock) { try { await wakeLock.release(); } catch {} wakeLock = null; }
+  };
+  // Re-acquire wake lock when tab returns to foreground
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      if (dc && dc.readyState === 'open') acquireWakeLock();
+      // Also attempt ICE restart if connection looks stale
+      if (pc && (pc.connectionState === 'disconnected' || pc.iceConnectionState === 'disconnected')) {
+        attemptIceRestart();
+      }
+    }
+  });
+
+  // ICE restart: re-runs candidate gathering without throwing away DTLS keys.
+  // Useful when the network blips but tab is still alive.
+  // Note: in this serverless model, ICE restart still requires exchanging
+  // a fresh offer/answer — but we can use the existing data channel to
+  // send them automatically if it's still open.
+  const attemptIceRestart = async () => {
+    if (!pc || iceRestartInProgress) return;
+    if (!dc || dc.readyState !== 'open') return; // need DC to exchange new SDP
+    if (role !== 'host') return; // Only host initiates ICE restart
+
+    iceRestartInProgress = true;
+    addSystem('Network change detected — refreshing connection');
+    try {
+      const offer = await pc.createOffer({ iceRestart: true });
+      await pc.setLocalDescription(offer);
+      await waitForIceComplete(pc);
+      // Ship over data channel
+      dc.send(JSON.stringify({
+        k: 'ice-restart-offer',
+        sdp: pc.localDescription.sdp,
+        type: pc.localDescription.type,
+      }));
+    } catch (err) {
+      console.error('ICE restart failed', err);
+      iceRestartInProgress = false;
+    }
+  };
+
+  const handleIceRestartOffer = async (msg) => {
+    try {
+      await pc.setRemoteDescription({ type: msg.type, sdp: msg.sdp });
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await waitForIceComplete(pc);
+      dc.send(JSON.stringify({
+        k: 'ice-restart-answer',
+        sdp: pc.localDescription.sdp,
+        type: pc.localDescription.type,
+      }));
+    } catch (err) {
+      console.error('ICE restart handle failed', err);
+    }
+  };
+
+  const handleIceRestartAnswer = async (msg) => {
+    try {
+      await pc.setRemoteDescription({ type: msg.type, sdp: msg.sdp });
+      iceRestartInProgress = false;
+      addSystem('Connection refreshed');
+    } catch (err) {
+      console.error('ICE restart answer failed', err);
+      iceRestartInProgress = false;
+    }
+  };
+
+  // Connection quality: poll RTCStats every 3s for RTT and packet loss
+  const startQualityMonitor = () => {
+    stopQualityMonitor();
+    let lastBytesReceived = 0; let lastTs = Date.now();
+    qualityTimer = setInterval(async () => {
+      if (!pc || pc.connectionState !== 'connected') return;
+      try {
+        const stats = await pc.getStats();
+        let rtt = null;
+        stats.forEach(r => {
+          if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.currentRoundTripTime !== undefined) {
+            rtt = r.currentRoundTripTime * 1000; // ms
+          }
+        });
+        // Quality classification
+        els.qualityBar.style.display = 'inline-flex';
+        els.qualityBar.classList.remove('good','warn','poor');
+        if (rtt === null)        els.qualityBar.classList.add('warn');
+        else if (rtt < 100)      els.qualityBar.classList.add('good');
+        else if (rtt < 300)      els.qualityBar.classList.add('warn');
+        else                     els.qualityBar.classList.add('poor');
+      } catch {}
+    }, 3000);
+  };
+  const stopQualityMonitor = () => {
+    if (qualityTimer) { clearInterval(qualityTimer); qualityTimer = null; }
+    els.qualityBar.style.display = 'none';
+  };
+
+  /* ── Mic permission ───────────────────────────────────────── */
+  const setMicState = (state) => {
+    micPermission = state;
+    els.micCard.classList.remove('granted','denied');
+    if (state === 'granted') {
+      els.micCard.classList.add('granted');
+      els.micTitle.textContent = 'Microphone Ready';
+      els.micSub.textContent = 'Voice calls will be available once the channel is established.';
+      els.btnGrantMic.style.display = 'none';
+    } else if (state === 'denied') {
+      els.micCard.classList.add('denied');
+      els.micTitle.textContent = 'Microphone Denied';
+      els.micSub.textContent = 'Voice calls disabled. Chat still works. Update browser permissions to enable voice.';
+      els.btnGrantMic.style.display = 'none';
+    } else {
+      els.micTitle.textContent = 'Microphone Required';
+      els.micSub.textContent = 'Grant access to enable voice calls. Chat works either way.';
+      els.btnGrantMic.style.display = '';
+    }
+  };
+
+  const requestMic = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        },
+        video: false
+      });
+      micStream = stream;
+      // Mute initially — we won't transmit until call is active
+      micStream.getAudioTracks().forEach(t => t.enabled = false);
+      setMicState('granted');
+      return true;
+    } catch (err) {
+      console.warn('mic denied:', err);
+      setMicState('denied');
+      return false;
+    }
+  };
+
+  els.btnGrantMic.addEventListener('click', requestMic);
+
+  /* ── Build PeerConnection ─────────────────────────────────── */
+  const buildPC = () => {
+    const conn = new RTCPeerConnection(RTC_CONFIG);
+
+    conn.onconnectionstatechange = () => {
+      const s = conn.connectionState;
+      switch (s) {
+        case 'connecting':   setStatus('connecting', 'Establishing channel…'); break;
+        case 'connected':
+          setStatus('connected',  'Channel secure');
+          // Update lastSeen for trusted peers (don't auto-trust untrusted)
+          if (peerIdentityFp && trustedPeers.has(peerIdentityFp)) {
+            const e = trustedPeers.get(peerIdentityFp);
+            e.lastSeen = Date.now();
+            idbSet(STORE_PEERS, peerIdentityFp, e).catch(()=>{});
+            renderRecentPeers();
+          }
+          break;
+        case 'disconnected': setStatus('disconnected', 'Disconnected');
+                             addSystem('Peer disconnected'); disableComposer(); endCallLocal(); break;
+        case 'failed':       setStatus('failed',     'Connection failed');
+                             addSystem('Connection failed'); disableComposer(); endCallLocal();
+                             toast('Connection failed', true); break;
+        case 'closed':       setStatus('disconnected', 'Disconnected');
+                             disableComposer(); endCallLocal(); break;
+      }
+    };
+
+    conn.ondatachannel = (ev) => attachDataChannel(ev.channel);
+
+    // VOICE: handle incoming remote audio track
+    conn.ontrack = (ev) => {
+      // The remote stream is delivered here. Attach to <audio>.
+      const [stream] = ev.streams;
+      els.remoteAudio.srcObject = stream;
+      // Note: track arrives even before an "intent to call" — we suppress
+      // playback by leaving the remote track muted until call is accepted.
+      // The simplest enforcement: set audio element volume.
+      els.remoteAudio.volume = 1.0;
+    };
+
+    // VOICE: pre-create an audio transceiver in BOTH directions.
+    // This bakes audio capability into the SDP so the negotiated session
+    // can carry voice without renegotiation. The transceiver's direction
+    // starts 'sendrecv' — but we only attach a real track when the user
+    // explicitly starts a call. The remote will get a silent track until then.
+    if (micStream) {
+      // We have mic → add the actual track (it's disabled by default)
+      const track = micStream.getAudioTracks()[0];
+      audioSender = conn.addTrack(track, micStream);
+      audioTransceiver = conn.getTransceivers().find(t => t.sender === audioSender);
+    } else {
+      // No mic permission → add a recv-only transceiver so we can still
+      // RECEIVE audio from peer. We won't be able to send, but we'll hear them.
+      audioTransceiver = conn.addTransceiver('audio', { direction: 'recvonly' });
+    }
+
+    return conn;
+  };
+
+  /* ── Data channel wiring ──────────────────────────────────── */
+  const attachDataChannel = (channel) => {
+    dc = channel;
+    dc.binaryType = 'arraybuffer';
+    dc.bufferedAmountLowThreshold = 256 * 1024;
+
+    dc.onopen = () => {
+      enableComposer();
+      els.emptyState?.remove();
+      addSystem('Secure channel established · End-to-end encrypted (DTLS-SRTP)');
+      toast('Connected');
+      els.callPill.style.display = 'flex';
+      updateCallUI();
+      // Resilience hooks
+      lastPeerActivity = Date.now();
+      startKeepalive();
+      startQualityMonitor();
+      acquireWakeLock();
+      // Stop clipboard watcher now that we're connected
+      stopClipboardWatcher();
+      // Show peer pill + identity status
+      updatePeerPillUI();
+      if (peerIdentityFp) {
+        const trusted = trustedPeers.has(peerIdentityFp);
+        const name = peerDisplayName();
+        addSystem(trusted
+          ? `Connected to ${name} · trusted peer`
+          : `Connected to ${name} · identity not yet verified`);
+      }
+    };
+
+    dc.onclose = () => {
+      addSystem('Channel closed');
+      disableComposer();
+      endCallLocal();
+      stopKeepalive();
+      stopQualityMonitor();
+      releaseWakeLock();
+      els.peerPill.classList.remove('connected', 'trusted');
+      // Re-arm clipboard watcher to catch reconnection attempts
+      if (trustedPeers.size > 0) {
+        setTimeout(() => startClipboardWatcher('offer'), 1000);
+      }
+    };
+
+    dc.onerror = (e) => { console.error('DC error', e); addSystem('Channel error'); };
+
+    dc.onmessage = (ev) => handleIncoming(ev.data);
+  };
+
+  /* ── Inbound message router ───────────────────────────────── */
+  const handleIncoming = (data) => {
+    lastPeerActivity = Date.now();
+    if (typeof data === 'string') {
+      let msg;
+      try { msg = JSON.parse(data); }
+      catch { return addMessage('incoming', data); }
+
+      switch (msg.k) {
+        case 'txt':         addMessage('incoming', msg.b); break;
+        case 'file-meta':   onFileMeta(msg);   break;
+        case 'file-end':    onFileEnd(msg);    break;
+        case 'call-start':  onPeerCallStart(); break;
+        case 'call-accept': onPeerCallAccept(); break;
+        case 'call-decline':onPeerCallDecline(); break;
+        case 'call-end':    onPeerCallEnd(); break;
+        case 'ping':        /* just updates lastPeerActivity above */ break;
+        case 'ice-restart-offer':  handleIceRestartOffer(msg); break;
+        case 'ice-restart-answer': handleIceRestartAnswer(msg); break;
+      }
+    } else {
+      const view = new DataView(data);
+      const idLen = view.getUint8(0);
+      const idBytes = new Uint8Array(data, 1, idLen);
+      const id = new TextDecoder().decode(idBytes);
+      const chunk = data.slice(1 + idLen);
+      onFileChunk(id, chunk);
+    }
+  };
+
+  /* ── Message rendering ────────────────────────────────────── */
+  const addMessage = (kind, text) => {
+    els.emptyState?.remove();
+    const div = document.createElement('div');
+    div.className = `msg ${kind}`;
+    div.innerHTML = `<div>${escapeHtml(text)}</div><div class="msg-meta">${fmtTime(new Date())}</div>`;
+    els.messages.appendChild(div);
+    els.messages.scrollTop = els.messages.scrollHeight;
+  };
+
+  const addSystem = (text) => {
+    els.emptyState?.remove();
+    const div = document.createElement('div');
+    div.className = 'msg system';
+    div.textContent = `— ${text} —`;
+    els.messages.appendChild(div);
+    els.messages.scrollTop = els.messages.scrollHeight;
+  };
+
+  const addCallEvent = (text, ended = false) => {
+    els.emptyState?.remove();
+    const div = document.createElement('div');
+    div.className = `msg call ${ended ? 'ended' : ''}`;
+    div.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+      <span>${text} · ${fmtTime(new Date())}</span>
+    `;
+    els.messages.appendChild(div);
+    els.messages.scrollTop = els.messages.scrollHeight;
+  };
+
+  const addFileMessage = (kind, name, size, id) => {
+    els.emptyState?.remove();
+    const div = document.createElement('div');
+    div.className = `msg file ${kind}`;
+    div.dataset.fileId = id;
+    div.innerHTML = `
+      <div class="file-card">
+        <div class="file-icon">${name.split('.').pop().slice(0,3).toUpperCase() || 'FIL'}</div>
+        <div class="file-info">
+          <div class="file-name">${escapeHtml(name)}</div>
+          <div class="file-size">${fmtSize(size)} · <span class="file-pct">0%</span></div>
+          <div class="file-progress"><div class="file-progress-bar"></div></div>
+        </div>
+      </div>
+      <div class="msg-meta" style="padding:0 14px 8px;">${fmtTime(new Date())}</div>
+    `;
+    els.messages.appendChild(div);
+    els.messages.scrollTop = els.messages.scrollHeight;
+    return div;
+  };
+  const updateFileProgress = (msgEl, sent, total) => {
+    const pct = Math.min(100, Math.floor((sent / total) * 100));
+    msgEl.querySelector('.file-progress-bar').style.width = pct + '%';
+    msgEl.querySelector('.file-pct').textContent = pct + '%';
+  };
+  const finishFileMessage = (msgEl, blob, name) => {
+    const url = URL.createObjectURL(blob);
+    const card = msgEl.querySelector('.file-card');
+    msgEl.querySelector('.file-progress').remove();
+    msgEl.querySelector('.file-pct').textContent = 'Complete';
+    const a = document.createElement('a');
+    a.href = url; a.download = name; a.className = 'file-download'; a.textContent = 'Download';
+    card.appendChild(a);
+  };
+
+  /* ── File transfer ────────────────────────────────────────── */
+  const CHUNK_SIZE = 16 * 1024;
+  const sendFile = async (file) => {
+    if (!dc || dc.readyState !== 'open') return;
+    const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+    dc.send(JSON.stringify({ k: 'file-meta', id, name: file.name, size: file.size, type: file.type }));
+    const msgEl = addFileMessage('outgoing', file.name, file.size, id);
+    const idBytes = new TextEncoder().encode(id);
+    const headerLen = 1 + idBytes.length;
+    let offset = 0;
+    while (offset < file.size) {
+      if (dc.bufferedAmount > 8 * 1024 * 1024) {
+        await new Promise(res => {
+          const handler = () => { dc.removeEventListener('bufferedamountlow', handler); res(); };
+          dc.addEventListener('bufferedamountlow', handler);
+        });
+      }
+      const slice = file.slice(offset, offset + CHUNK_SIZE);
+      const buf = await slice.arrayBuffer();
+      const out = new Uint8Array(headerLen + buf.byteLength);
+      out[0] = idBytes.length; out.set(idBytes, 1); out.set(new Uint8Array(buf), headerLen);
+      try { dc.send(out.buffer); }
+      catch (err) { console.error('send failed', err); addSystem(`File transfer failed: ${file.name}`); return; }
+      offset += buf.byteLength;
+      updateFileProgress(msgEl, offset, file.size);
+    }
+    dc.send(JSON.stringify({ k: 'file-end', id }));
+    finishFileMessage(msgEl, file, file.name);
+  };
+  const onFileMeta = (msg) => {
+    const msgEl = addFileMessage('incoming', msg.name, msg.size, msg.id);
+    incomingFiles.set(msg.id, { name: msg.name, size: msg.size, type: msg.type, chunks: [], received: 0, msgEl });
+  };
+  const onFileChunk = (id, chunk) => {
+    const f = incomingFiles.get(id); if (!f) return;
+    f.chunks.push(chunk); f.received += chunk.byteLength;
+    updateFileProgress(f.msgEl, f.received, f.size);
+  };
+  const onFileEnd = ({ id }) => {
+    const f = incomingFiles.get(id); if (!f) return;
+    const blob = new Blob(f.chunks, { type: f.type || 'application/octet-stream' });
+    finishFileMessage(f.msgEl, blob, f.name);
+    incomingFiles.delete(id);
+  };
+
+  /* ── VOICE CALL CONTROLS ──────────────────────────────────── */
+
+  const updateCallUI = () => {
+    if (!dc || dc.readyState !== 'open') {
+      els.callPill.style.display = 'none';
+      return;
+    }
+    els.callPill.style.display = 'flex';
+
+    if (inCall) {
+      els.callPill.classList.add('active');
+      els.callLabel.textContent = isMuted ? 'Muted' : 'On Air';
+      // Swap call → end
+      els.btnCall.classList.remove('start');
+      els.btnCall.classList.add('end');
+      els.btnCall.title = 'End call';
+      els.btnMute.disabled = !micStream;  // can't mute if no mic
+      els.btnMute.classList.toggle('muted', isMuted);
+    } else {
+      els.callPill.classList.remove('active');
+      els.callLabel.textContent = 'Idle';
+      els.btnCall.classList.remove('end');
+      els.btnCall.classList.add('start');
+      els.btnCall.title = micStream ? 'Start voice call' : 'Mic required';
+      els.btnCall.disabled = !micStream;
+      els.btnMute.disabled = true;
+    }
+  };
+
+  // Audio level meter — visualize either local mic (when muted=false) or
+  // remote stream (when in call). Uses Web Audio AnalyserNode.
+  const startLevelMeter = () => {
+    stopLevelMeter();
+    try {
+      audioContext = audioContext || new (window.AudioContext || window.webkitAudioContext)();
+      // Prefer remote stream so user sees peer activity
+      const stream = els.remoteAudio.srcObject;
+      if (!stream) return;
+      const source = audioContext.createMediaStreamSource(stream);
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 64;
+      source.connect(analyser);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const bars = els.callLevel.querySelectorAll('span');
+      const tick = () => {
+        analyser.getByteFrequencyData(data);
+        // Use 5 frequency buckets for our 5 bars
+        const buckets = 5;
+        const perBucket = Math.floor(data.length / buckets);
+        for (let i = 0; i < buckets; i++) {
+          let sum = 0;
+          for (let j = 0; j < perBucket; j++) sum += data[i * perBucket + j];
+          const avg = sum / perBucket / 255;            // 0..1
+          const h = Math.max(3, Math.round(avg * 14));  // 3..14 px
+          bars[i].style.height = h + 'px';
+        }
+        levelAnimId = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (err) {
+      console.warn('level meter unavailable', err);
+    }
+  };
+  const stopLevelMeter = () => {
+    if (levelAnimId) cancelAnimationFrame(levelAnimId);
+    levelAnimId = null;
+    if (analyser) { try { analyser.disconnect(); } catch {} analyser = null; }
+    // Reset bars
+    els.callLevel.querySelectorAll('span').forEach(b => b.style.height = '3px');
+  };
+
+  // Initiator side: start a call
+  const startCall = () => {
+    if (!dc || dc.readyState !== 'open') return;
+    if (!micStream) { toast('Microphone required for outgoing calls', true); return; }
+    if (inCall) return;
+    // Tell peer we want to call — they must accept
+    dc.send(JSON.stringify({ k: 'call-start' }));
+    addCallEvent('Calling peer…');
+    toast('Calling…');
+    // Don't unmute the track until peer accepts.
+    // Update UI to "Calling" state via callLabel
+    els.callPill.classList.add('active');
+    els.callLabel.textContent = 'Calling…';
+  };
+
+  // Receiver side: peer wants to call us
+  const onPeerCallStart = () => {
+    if (inCall) {
+      // Already in a call — auto-accept (re-invite scenario)
+      acceptCall();
+      return;
+    }
+    els.callBanner.classList.add('show');
+    addCallEvent('Incoming call');
+    // Soft chime via Web Audio (no external assets)
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.frequency.value = 880; g.gain.value = 0.04;
+      o.connect(g); g.connect(ctx.destination);
+      o.start(); setTimeout(() => { o.stop(); ctx.close(); }, 220);
+    } catch {}
+  };
+
+  const acceptCall = () => {
+    els.callBanner.classList.remove('show');
+    if (!dc || dc.readyState !== 'open') return;
+    dc.send(JSON.stringify({ k: 'call-accept' }));
+    enterCall();
+  };
+
+  const declineCall = () => {
+    els.callBanner.classList.remove('show');
+    if (!dc || dc.readyState !== 'open') return;
+    dc.send(JSON.stringify({ k: 'call-decline' }));
+    addCallEvent('Call declined', true);
+  };
+
+  // Peer accepted our outgoing call
+  const onPeerCallAccept = () => {
+    enterCall();
+  };
+
+  const onPeerCallDecline = () => {
+    addCallEvent('Peer declined call', true);
+    toast('Call declined');
+    els.callPill.classList.remove('active');
+    els.callLabel.textContent = 'Idle';
+  };
+
+  // Both sides activate the call
+  const enterCall = () => {
+    inCall = true;
+    isMuted = false;
+    // Unmute outgoing track if we have one
+    if (micStream) micStream.getAudioTracks().forEach(t => t.enabled = true);
+    // Resume audio context (browsers gate it on user gesture)
+    if (audioContext && audioContext.state === 'suspended') audioContext.resume().catch(()=>{});
+    addCallEvent('Voice channel active');
+    updateCallUI();
+    startLevelMeter();
+  };
+
+  // End an active call (we initiated the end)
+  const endCall = () => {
+    if (!inCall) {
+      // Cancel an outgoing ringing call
+      if (els.callLabel.textContent === 'Calling…') {
+        if (dc && dc.readyState === 'open') dc.send(JSON.stringify({ k: 'call-end' }));
+        els.callPill.classList.remove('active');
+        els.callLabel.textContent = 'Idle';
+        addCallEvent('Call cancelled', true);
+      }
+      return;
+    }
+    if (dc && dc.readyState === 'open') dc.send(JSON.stringify({ k: 'call-end' }));
+    endCallLocal();
+    addCallEvent('Call ended', true);
+  };
+
+  // Peer ended the call
+  const onPeerCallEnd = () => {
+    if (inCall || els.callLabel.textContent === 'Calling…') {
+      endCallLocal();
+      addCallEvent('Peer ended call', true);
+    }
+  };
+
+  // Local-only cleanup (no signal sent — used on disconnect too)
+  const endCallLocal = () => {
+    inCall = false;
+    isMuted = false;
+    if (micStream) micStream.getAudioTracks().forEach(t => t.enabled = false);
+    stopLevelMeter();
+    updateCallUI();
+  };
+
+  const toggleMute = () => {
+    if (!inCall || !micStream) return;
+    isMuted = !isMuted;
+    micStream.getAudioTracks().forEach(t => t.enabled = !isMuted);
+    updateCallUI();
+    toast(isMuted ? 'Muted' : 'Unmuted');
+  };
+
+  els.btnCall.addEventListener('click', () => {
+    if (inCall || els.callLabel.textContent === 'Calling…') endCall();
+    else startCall();
+  });
+  els.btnMute.addEventListener('click', toggleMute);
+  els.btnAcceptCall.addEventListener('click', acceptCall);
+  els.btnDeclineCall.addEventListener('click', declineCall);
+
+  /* ── Composer ─────────────────────────────────────────────── */
+  const enableComposer = () => {
+    els.textInput.disabled = false; els.btnSend.disabled = false; els.btnAttach.disabled = false;
+    els.textInput.placeholder = 'Type a message…'; els.textInput.focus();
+  };
+  const disableComposer = () => {
+    els.textInput.disabled = true; els.btnSend.disabled = true; els.btnAttach.disabled = true;
+    els.textInput.placeholder = 'Channel offline — complete handshake to begin…';
+  };
+
+  /* ── ICE-gathering helper ─────────────────────────────────── */
+  const waitForIceComplete = (conn) => new Promise((resolve) => {
+    if (conn.iceGatheringState === 'complete') return resolve();
+    const check = () => {
+      if (conn.iceGatheringState === 'complete') {
+        conn.removeEventListener('icegatheringstatechange', check);
+        resolve();
+      }
+    };
+    conn.addEventListener('icegatheringstatechange', check);
+    setTimeout(() => {
+      conn.removeEventListener('icegatheringstatechange', check);
+      resolve();
+    }, 5000);
+  });
+
+  /* ── Role switching ───────────────────────────────────────── */
+  const setRole = (r) => {
+    role = r;
+    els.roleHost.classList.toggle('active', r === 'host');
+    els.roleJoiner.classList.toggle('active', r === 'joiner');
+    els.hostPane.style.display   = r === 'host'   ? '' : 'none';
+    els.joinerPane.style.display = r === 'joiner' ? '' : 'none';
+  };
+
+  /* ── Host: generate offer ─────────────────────────────────── */
+  els.btnGenOffer.addEventListener('click', async () => {
+    try {
+      // Auto-request mic if not yet decided
+      if (micPermission === 'unknown') await requestMic();
+
+      els.btnGenOffer.disabled = true;
+      els.btnGenOffer.textContent = 'Gathering…';
+      setStatus('connecting', 'Preparing offer…');
+
+      pc = buildPC();
+      dc = pc.createDataChannel('cipher', { ordered: true });
+      attachDataChannel(dc);
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await waitForIceComplete(pc);
+
+      const sdpCode = await encodeSDP(pc.localDescription);
+      // Wrap with signed identity envelope
+      const signedCode = await buildSignedHandshake(sdpCode);
+      els.offerOut.value = signedCode;
+      els.btnCopyOffer.disabled = false;
+      els.btnGenOffer.textContent = 'Regenerate Offer';
+      els.btnGenOffer.disabled = false;
+      setStep('step-h1', 'done');
+      setStep('step-h2', 'active');
+      setStatus('connecting', 'Awaiting answer…');
+    } catch (err) {
+      console.error(err);
+      toast('Failed to generate offer', true);
+      els.btnGenOffer.disabled = false;
+      els.btnGenOffer.textContent = 'Generate Offer';
+    }
+  });
+
+  /* ── Host: accept answer ──────────────────────────────────── */
+  els.answerIn.addEventListener('input', async () => {
+    const val = els.answerIn.value.trim();
+    els.btnAcceptAnswer.disabled = !val;
+    if (!val || val.length < 100) return;
+    // Try to peek at the identity without fully applying
+    try {
+      const { peerFp, isTrusted } = await verifySignedHandshake(val);
+      if (isTrusted) {
+        // Auto-accept silently for trusted peers
+        const trusted = trustedPeers.get(peerFp);
+        toast(`Trusted peer — auto-connecting to ${trusted.nickname || peerFp.slice(0,11)}`);
+        setTimeout(() => els.btnAcceptAnswer.click(), 300);
+      }
+    } catch {
+      // Not a valid signed handshake or other error — let user click manually
+    }
+  });
+  els.btnAcceptAnswer.addEventListener('click', async () => {
+    try {
+      els.btnAcceptAnswer.disabled = true;
+      els.btnAcceptAnswer.textContent = 'Verifying…';
+      // Verify and unwrap signed handshake
+      const { sdpCode, peerFp, peerNick, isTrusted } = await verifySignedHandshake(els.answerIn.value);
+      peerIdentityFp = peerFp;
+      peerSelfNickname = peerNick;
+      const desc = await decodeSDP(sdpCode);
+      await pc.setRemoteDescription(desc);
+      setStep('step-h2', 'done');
+      els.btnAcceptAnswer.textContent = isTrusted ? 'Trusted Peer · Connecting' : 'Connecting…';
+      if (!isTrusted) {
+        setTimeout(() => {
+          toast('New peer — verify fingerprint via the Identity card', false);
+        }, 1500);
+      }
+    } catch (err) {
+      console.error(err);
+      toast('Invalid, corrupt, or unsigned answer code', true);
+      els.btnAcceptAnswer.disabled = false;
+      els.btnAcceptAnswer.textContent = 'Accept Answer';
+    }
+  });
+
+  /* ── Joiner: generate answer ──────────────────────────────── */
+  els.offerIn.addEventListener('input', async () => {
+    const val = els.offerIn.value.trim();
+    els.btnGenAnswer.disabled = !val;
+    if (!val || val.length < 100) return;
+    try {
+      const { peerFp, isTrusted } = await verifySignedHandshake(val);
+      if (isTrusted) {
+        const trusted = trustedPeers.get(peerFp);
+        toast(`Trusted peer — auto-answering ${trusted.nickname || peerFp.slice(0,11)}`);
+        setTimeout(() => els.btnGenAnswer.click(), 300);
+      }
+    } catch {
+      // Not a valid signed handshake — user will click manually
+    }
+  });
+  els.btnGenAnswer.addEventListener('click', async () => {
+    try {
+      if (micPermission === 'unknown') await requestMic();
+
+      els.btnGenAnswer.disabled = true;
+      els.btnGenAnswer.textContent = 'Verifying…';
+      setStatus('connecting', 'Building answer…');
+
+      // Verify and unwrap host's signed offer
+      const { sdpCode, peerFp, peerNick, isTrusted } = await verifySignedHandshake(els.offerIn.value);
+      peerIdentityFp = peerFp;
+      peerSelfNickname = peerNick;
+
+      pc = buildPC();
+      const offerDesc = await decodeSDP(sdpCode);
+      await pc.setRemoteDescription(offerDesc);
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await waitForIceComplete(pc);
+
+      const ourSdpCode = await encodeSDP(pc.localDescription);
+      const signedCode = await buildSignedHandshake(ourSdpCode);
+      els.answerOut.value = signedCode;
+      els.btnCopyAnswer.disabled = false;
+      els.btnGenAnswer.textContent = 'Regenerate';
+      setStep('step-j1', 'done');
+      setStep('step-j2', 'active');
+      setStatus('connecting', isTrusted ? 'Awaiting trusted host…' : 'Awaiting host…');
+
+      // Auto-copy answer to clipboard if peer is trusted (seamless flow)
+      if (isTrusted) {
+        try {
+          await navigator.clipboard.writeText(signedCode);
+          toast('Answer copied — paste back to peer');
+        } catch {
+          toast('Answer ready — click Copy then paste back to peer');
+        }
+      }
+
+      if (!isTrusted) {
+        toast('New peer — verify fingerprint via the Identity card', false);
+      }
+    } catch (err) {
+      console.error(err);
+      toast('Invalid, corrupt, or unsigned offer code', true);
+      els.btnGenAnswer.disabled = false;
+      els.btnGenAnswer.textContent = 'Generate Answer';
+    }
+  });
+
+  /* ── Copy ─────────────────────────────────────────────────── */
+  const copy = async (text, label) => {
+    try { await navigator.clipboard.writeText(text); toast(`${label} copied`); }
+    catch {
+      const ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta);
+      ta.select(); document.execCommand('copy'); ta.remove();
+      toast(`${label} copied`);
+    }
+  };
+  els.btnCopyOffer.addEventListener('click',  () => copy(els.offerOut.value,  'Offer'));
+  els.btnCopyAnswer.addEventListener('click', () => copy(els.answerOut.value, 'Answer'));
+
+  /* ── Reset ────────────────────────────────────────────────── */
+  els.btnReset.addEventListener('click', () => {
+    endCallLocal();
+    stopKeepalive();
+    stopQualityMonitor();
+    releaseWakeLock();
+    if (dc) try { dc.close(); } catch {}
+    if (pc) try { pc.close(); } catch {}
+    dc = pc = audioSender = audioTransceiver = null;
+    incomingFiles.clear();
+    peerIdentityFp = null;
+    peerSelfNickname = null;
+    iceRestartInProgress = false;
+    els.remoteAudio.srcObject = null;
+    els.peerPill.classList.remove('connected', 'trusted');
+
+    ['offerOut','offerIn','answerOut','answerIn'].forEach(id => els[id].value = '');
+    [els.btnCopyOffer, els.btnCopyAnswer, els.btnAcceptAnswer, els.btnGenAnswer].forEach(b => b.disabled = true);
+    els.btnGenOffer.disabled = false;
+    els.btnGenOffer.textContent = 'Generate Offer';
+    els.btnGenAnswer.textContent = 'Generate Answer';
+    els.btnAcceptAnswer.textContent = 'Accept Answer';
+
+    setStep('step-h1','active'); setStep('step-h2','inactive');
+    setStep('step-j1','active'); setStep('step-j2','inactive');
+
+    els.messages.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'empty-state'; empty.id = 'emptyState';
+    empty.innerHTML = `
+      <div class="glyph">∞</div>
+      <h2>Awaiting Channel</h2>
+      <p>Complete the handshake on the left to establish a direct, encrypted connection between you and your peer.</p>
+      <div class="security-note">
+        <strong>END-TO-END ENCRYPTED</strong><br>
+        Text, files, and voice are secured by WebRTC's mandatory DTLS-SRTP layer. Nothing passes through any server. The data flows directly between the two devices.
+      </div>`;
+    els.messages.appendChild(empty);
+    els.emptyState = empty;
+
+    disableComposer();
+    els.callPill.style.display = 'none';
+    els.callBanner.classList.remove('show');
+    setStatus('disconnected', 'Disconnected');
+    toast('Session reset');
+  });
+
+  /* ── Send text ────────────────────────────────────────────── */
+  const sendText = () => {
+    const text = els.textInput.value.trim();
+    if (!text || !dc || dc.readyState !== 'open') return;
+    dc.send(JSON.stringify({ k: 'txt', b: text }));
+    addMessage('outgoing', text);
+    els.textInput.value = '';
+  };
+  els.btnSend.addEventListener('click', sendText);
+  els.textInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
+  });
+
+  /* ── Send file ────────────────────────────────────────────── */
+  els.btnAttach.addEventListener('click', () => els.fileInput.click());
+  els.fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    if (file.size > 1024 * 1024 * 1024) return toast('Files over 1 GB not supported', true);
+    await sendFile(file);
+    els.fileInput.value = '';
+  });
+
+  /* ── Role buttons ─────────────────────────────────────────── */
+  els.roleHost.addEventListener('click',   () => { els.btnReset.click(); setRole('host'); });
+  els.roleJoiner.addEventListener('click', () => { els.btnReset.click(); setRole('joiner'); });
+
+  /* ── Verify Modal ─────────────────────────────────────────── */
+  els.btnVerifyId.addEventListener('click', () => {
+    els.myFpDisplay.textContent   = formatFp(myIdentity?.fingerprint);
+    els.peerFpDisplay.textContent = peerIdentityFp ? formatFp(peerIdentityFp) : '(no peer connected)';
+    // Show what peer calls themselves (if anything)
+    els.peerSelfNickname.textContent = peerSelfNickname ? `(self-named: ${peerSelfNickname})` : '';
+    // Pre-fill local label with: existing trusted label, or peer's self nickname
+    const existing = peerIdentityFp ? trustedPeers.get(peerIdentityFp) : null;
+    els.peerNicknameInput.value = existing?.nickname || peerSelfNickname || '';
+    els.peerNicknameInput.disabled = !peerIdentityFp;
+    els.btnConfirmVerify.disabled = !peerIdentityFp;
+    els.btnConfirmVerify.style.opacity = peerIdentityFp ? '1' : '0.4';
+    els.verifyOverlay.classList.add('show');
+  });
+  els.btnCloseVerify.addEventListener('click', () => els.verifyOverlay.classList.remove('show'));
+  els.btnConfirmVerify.addEventListener('click', async () => {
+    if (!peerIdentityFp) return;
+    const label = els.peerNicknameInput.value.trim();
+    await trustPeer(peerIdentityFp, label);
+    els.verifyOverlay.classList.remove('show');
+    updatePeerPillUI();
+    renderRecentPeers();
+    const name = peerDisplayName();
+    addSystem(`Peer verified and saved as ${name}`);
+    toast('Peer trusted');
+  });
+
+  /* ── Edit my own nickname ─────────────────────────────────── */
+  els.btnEditNickname.addEventListener('click', async () => {
+    const current = myNickname || '';
+    const next = prompt('Set your nickname (visible to peers you connect with):', current);
+    if (next === null) return; // cancelled
+    await saveMyNickname(next);
+    if (next.trim()) toast('Nickname updated');
+  });
+  els.myNickname.addEventListener('click', (e) => {
+    // Clicking the placeholder text also opens edit
+    if (e.target === els.btnEditNickname || els.btnEditNickname.contains(e.target)) return;
+    if (!myNickname) els.btnEditNickname.click();
+  });
+
+  /* ── Identity rotation ────────────────────────────────────── */
+  els.btnRotateId.addEventListener('click', rotateIdentity);
+
+  /* ── Init ─────────────────────────────────────────────────── */
+  setStatus('disconnected', 'Disconnected');
+  setStep('step-h1','active'); setStep('step-j1','active');
+  setMicState('unknown');
+
+  if (typeof RTCPeerConnection === 'undefined') {
+    toast('WebRTC not supported in this browser', true);
+    els.btnGenOffer.disabled = true; els.btnGenAnswer.disabled = true;
+  }
+
+  // Load (or create) persistent identity, then update UI
+  (async () => {
+    try {
+      await loadOrCreateIdentity();
+      await loadTrustedPeers();
+      updateIdentityUI();
+      renderRecentPeers();
+      const peerCount = trustedPeers.size;
+      if (peerCount > 0) {
+        const peers = Array.from(trustedPeers.values());
+        const named = peers.filter(p => p.nickname).map(p => p.nickname);
+        if (named.length > 0) {
+          addSystem(`Identity loaded · ${peerCount} trusted peer${peerCount === 1 ? '' : 's'} known (${named.slice(0,3).join(', ')}${named.length > 3 ? '…' : ''})`);
+        } else {
+          addSystem(`Identity loaded · ${peerCount} trusted peer${peerCount === 1 ? '' : 's'} known`);
+        }
+      }
+      // Gentle nudge if no nickname set yet
+      if (!myNickname) {
+        setTimeout(() => toast('Tip: set a nickname so peers can identify you', false), 800);
+      }
+      // Detect handshake code already on clipboard (best-effort, silent on failure)
+      setTimeout(detectClipboardHandshake, 600);
+      // Start background watcher if we have trusted peers — catches peer offers
+      // that arrive while the app is open and idle
+      if (trustedPeers.size > 0) {
+        setTimeout(() => startClipboardWatcher('offer'), 2000);
+      }
+    } catch (err) {
+      console.error('identity init failed', err);
+      toast('Persistent identity unavailable', true);
+      els.identityFingerprint.textContent = 'Unavailable (private mode?)';
+    }
+  })();
+
+  // Probe existing mic permission silently
+  if (navigator.permissions) {
+    navigator.permissions.query({ name: 'microphone' }).then(p => {
+      if (p.state === 'granted') {
+        requestMic();
+      } else if (p.state === 'denied') {
+        setMicState('denied');
+      }
+      p.onchange = () => {
+        if (p.state === 'denied') setMicState('denied');
+      };
+    }).catch(() => {});
+  }
+})();
+</script>
+
+</body>
+</html>
