@@ -731,7 +731,7 @@
             <div class="step-num">2</div>
             <div class="step-label">Paste Answer</div>
           </div>
-          <textarea class="code" id="answerIn" placeholder="Paste the answer code from your peer…"></textarea>
+          <textarea class="code" id="answerIn" placeholder="Paste the answer code or answer link from your peer…"></textarea>
           <div class="btn-row">
             <button class="btn btn-primary" id="btnAcceptAnswer" disabled>Accept Answer</button>
           </div>
@@ -745,7 +745,7 @@
             <div class="step-num">1</div>
             <div class="step-label">Paste Offer</div>
           </div>
-          <textarea class="code" id="offerIn" placeholder="Paste the offer code from the host…"></textarea>
+          <textarea class="code" id="offerIn" placeholder="Paste the offer code or offer link from the host…"></textarea>
           <div class="btn-row">
             <button class="btn btn-primary" id="btnGenAnswer">Generate Answer</button>
           </div>
@@ -2291,18 +2291,41 @@
     copy(buildShareUrl('a', els.answerOut.value), 'Answer link');
   });
 
+  /* ── Accept URL pasted into the answer/offer textareas ─────────
+     If the peer sends a full share-link, let the host paste it into
+     the answer box and we extract the code automatically. This
+     avoids the "clicking the link opens a new tab where pc is gone"
+     trap. ─────────────────────────────────────────────────────── */
+  const unwrapIfLink = (el) => {
+    const v = el.value.trim();
+    if (!v.includes('#o=') && !v.includes('#a=')) return;
+    const parsed = parseHandshakeString(v);
+    if (parsed) el.value = parsed.code;
+  };
+  els.answerIn.addEventListener('input', () => unwrapIfLink(els.answerIn));
+  els.offerIn.addEventListener('input',  () => unwrapIfLink(els.offerIn));
+
+  /* ── Hash parsing ─────────────────────────────────────────────
+     Accepts either a bare "#o=…"/"#a=…" hash or a full URL string
+     containing one. Returns { kind, code } or null. ─────────────── */
+  const parseHandshakeString = (input) => {
+    if (!input) return null;
+    // Find a "#o=..." or "#a=..." substring anywhere in the input
+    const m = String(input).match(/#(o|a)=([^\s]+)/);
+    if (!m) return null;
+    let code;
+    try { code = decodeURIComponent(m[2]); } catch { return null; }
+    if (!code || code.length < 100) return null;
+    return { kind: m[1], code };
+  };
+
   /* ── Hash auto-apply ──────────────────────────────────────────
      If the URL hash contains a handshake (opened via a shared
      link), auto-fill the correct field and trigger the flow. ────── */
   const applyHashHandshake = () => {
-    const raw = location.hash.replace(/^#/, '');
-    if (!raw) return false;
-    const m = raw.match(/^(o|a)=(.+)$/);
-    if (!m) return false;
-    const kind = m[1];
-    let code;
-    try { code = decodeURIComponent(m[2]); } catch { return false; }
-    if (!code || code.length < 100) return false;
+    const parsed = parseHandshakeString(location.hash);
+    if (!parsed) return false;
+    const { kind, code } = parsed;
     // Clear the hash so it isn't re-applied on reload
     history.replaceState(null, '', location.pathname + location.search);
     if (kind === 'o') {
@@ -2474,6 +2497,9 @@
       }
       // If a handshake came in via URL hash (#o= / #a=), use that first
       const hashUsed = applyHashHandshake();
+      // React to hash changes too (e.g. host pastes the answer URL into
+      // the address bar of the same tab, or clicks a same-origin link)
+      window.addEventListener('hashchange', applyHashHandshake);
       // Detect handshake code already on clipboard (best-effort, silent on failure)
       if (!hashUsed) setTimeout(detectClipboardHandshake, 600);
       // Start background watcher if we have trusted peers — catches peer offers
