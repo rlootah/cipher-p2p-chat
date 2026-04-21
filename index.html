@@ -1713,6 +1713,8 @@
       acquireWakeLock();
       // Stop clipboard watcher now that we're connected
       stopClipboardWatcher();
+      // Connected — no longer need the cross-tab answer relay
+      if (typeof stopAnswerChannel === 'function') stopAnswerChannel();
       // Show peer pill + identity status
       updatePeerPillUI();
       if (peerIdentityFp) {
@@ -2142,6 +2144,9 @@
       setStep('step-h1', 'done');
       setStep('step-h2', 'active');
       setStatus('connecting', 'Awaiting answer…');
+      // Start listening for an answer that may arrive via a new
+      // tab opened by clicking the peer's answer-link.
+      startAnswerChannel();
     } catch (err) {
       console.error(err);
       toast('Failed to generate offer', true);
@@ -2305,6 +2310,92 @@
   els.answerIn.addEventListener('input', () => unwrapIfLink(els.answerIn));
   els.offerIn.addEventListener('input',  () => unwrapIfLink(els.offerIn));
 
+  /* ── Cross-tab answer relay ───────────────────────────────────
+     When the host clicks the peer's answer link, the browser
+     opens a new tab where `pc` doesn't exist. The new tab posts
+     the answer code on a BroadcastChannel; the host's original
+     tab listens and accepts it. ─────────────────────────────── */
+  const HANDSHAKE_CHANNEL = 'cipher-handshake-v1';
+  let answerChannel = null;
+  const startAnswerChannel = () => {
+    if (typeof BroadcastChannel !== 'function') return;
+    stopAnswerChannel();
+    try {
+      answerChannel = new BroadcastChannel(HANDSHAKE_CHANNEL);
+      answerChannel.onmessage = (ev) => {
+        if (!ev.data || ev.data.type !== 'answer' || !ev.data.code) return;
+        if (!pc) return;
+        try {
+          answerChannel.postMessage({ type: 'ack' });
+        } catch {}
+        els.answerIn.value = ev.data.code;
+        els.answerIn.dispatchEvent(new Event('input'));
+        toast('Answer received from shared link');
+        setTimeout(() => { if (!els.btnAcceptAnswer.disabled) els.btnAcceptAnswer.click(); }, 150);
+      };
+    } catch {}
+  };
+  const stopAnswerChannel = () => {
+    if (answerChannel) { try { answerChannel.close(); } catch {} answerChannel = null; }
+  };
+
+  /* Relay an answer from a just-opened new tab back to the host's
+     original tab. Shows a friendly "delivered / close tab" overlay. */
+  const relayAnswerToHostTab = (code) => {
+    const showOverlay = (title, body, ok) => {
+      const ov = document.createElement('div');
+      ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.82);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;backdrop-filter:blur(6px);';
+      const box = document.createElement('div');
+      box.style.cssText = 'max-width:420px;width:100%;background:var(--bg-2,#111);border:1px solid var(--line-1,#333);border-radius:12px;padding:28px;color:var(--text,#eee);font-family:inherit;text-align:center;';
+      box.innerHTML = `
+        <div style="font-size:40px;margin-bottom:12px;">${ok ? '✓' : '!'}</div>
+        <h2 style="margin:0 0 10px;font-size:18px;">${title}</h2>
+        <p style="margin:0 0 18px;font-size:14px;opacity:0.8;line-height:1.5;">${body}</p>
+        <div style="display:flex;gap:8px;justify-content:center;">
+          <button class="btn" id="_relayCopy">Copy Answer Code</button>
+          <button class="btn btn-primary" id="_relayClose">Close</button>
+        </div>
+      `;
+      ov.appendChild(box);
+      document.body.appendChild(ov);
+      box.querySelector('#_relayCopy').onclick = () => copy(code, 'Answer code');
+      box.querySelector('#_relayClose').onclick = () => { try { window.close(); } catch {} ov.remove(); };
+    };
+
+    if (typeof BroadcastChannel !== 'function') {
+      showOverlay('Cross-tab relay unavailable',
+        'Your browser does not support BroadcastChannel. Copy the answer code below and paste it into the host\'s original tab.',
+        false);
+      return;
+    }
+
+    let delivered = false;
+    let ch;
+    try { ch = new BroadcastChannel(HANDSHAKE_CHANNEL); } catch {
+      showOverlay('Relay failed', 'Copy the answer code and paste it manually into the host tab.', false);
+      return;
+    }
+    ch.onmessage = (ev) => {
+      if (ev.data && ev.data.type === 'ack') {
+        delivered = true;
+        try { ch.close(); } catch {}
+        showOverlay('Answer delivered',
+          'The host\'s original tab received your answer. The chat should now be connecting there. You can close this tab.',
+          true);
+      }
+    };
+    try { ch.postMessage({ type: 'answer', code }); } catch {}
+
+    // If no ack within 1.5s, fall back to manual instructions
+    setTimeout(() => {
+      if (delivered) return;
+      try { ch.close(); } catch {}
+      showOverlay('Host tab not found',
+        'No open tab with a pending offer was detected. Copy the answer code below and paste it into the host\'s original tab.',
+        false);
+    }, 1500);
+  };
+
   /* ── Hash parsing ─────────────────────────────────────────────
      Accepts either a bare "#o=…"/"#a=…" hash or a full URL string
      containing one. Returns { kind, code } or null. ─────────────── */
@@ -2335,13 +2426,15 @@
       toast('Offer loaded from link — generating answer…');
       setTimeout(() => { if (!els.btnGenAnswer.disabled) els.btnGenAnswer.click(); }, 200);
     } else {
-      // Answer link — host must already have pc alive from their offer
-      els.answerIn.value = code;
-      els.answerIn.dispatchEvent(new Event('input'));
-      if (!pc) {
-        toast('Answer link loaded but no active offer — generate an offer first', true);
-      } else {
+      // Answer link. If this tab is the host (pc alive), apply directly.
+      // Otherwise, we're in a new tab opened by clicking the peer's link —
+      // relay the answer to the host's original tab via BroadcastChannel.
+      if (pc) {
+        els.answerIn.value = code;
+        els.answerIn.dispatchEvent(new Event('input'));
         toast('Answer loaded from link');
+      } else {
+        relayAnswerToHostTab(code);
       }
     }
     return true;
@@ -2356,6 +2449,7 @@
     if (dc) try { dc.close(); } catch {}
     if (pc) try { pc.close(); } catch {}
     dc = pc = audioSender = audioTransceiver = null;
+    stopAnswerChannel();
     incomingFiles.clear();
     peerIdentityFp = null;
     peerSelfNickname = null;
