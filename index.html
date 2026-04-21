@@ -720,9 +720,10 @@
           </div>
           <textarea class="code" id="offerOut" readonly placeholder="Your offer code will appear here…" style="margin-top:10px;"></textarea>
           <div class="btn-row">
-            <button class="btn" id="btnCopyOffer" disabled>Copy</button>
+            <button class="btn" id="btnCopyOffer" disabled>Copy Code</button>
+            <button class="btn" id="btnShareOffer" disabled>Copy Link</button>
           </div>
-          <div class="hint">Send this code to your peer through any private channel.</div>
+          <div class="hint">Send the code or the link to your peer through any private channel.</div>
         </div>
 
         <div class="step" id="step-h2">
@@ -757,9 +758,10 @@
           </div>
           <textarea class="code" id="answerOut" readonly placeholder="Your answer code will appear here…"></textarea>
           <div class="btn-row">
-            <button class="btn" id="btnCopyAnswer" disabled>Copy</button>
+            <button class="btn" id="btnCopyAnswer" disabled>Copy Code</button>
+            <button class="btn" id="btnShareAnswer" disabled>Copy Link</button>
           </div>
-          <div class="hint">Return this code to the host. The channel will open automatically.</div>
+          <div class="hint">Return the code or the link to the host. The channel will open automatically.</div>
         </div>
       </div>
 
@@ -885,6 +887,8 @@
     btnGenAnswer:  $('btnGenAnswer'),
     answerOut:     $('answerOut'),
     btnCopyAnswer: $('btnCopyAnswer'),
+    btnShareOffer:  $('btnShareOffer'),
+    btnShareAnswer: $('btnShareAnswer'),
     btnReset:      $('btnReset'),
     messages:      $('messages'),
     emptyState:    $('emptyState'),
@@ -2132,6 +2136,7 @@
       const signedCode = await buildSignedHandshake(sdpCode);
       els.offerOut.value = signedCode;
       els.btnCopyOffer.disabled = false;
+      els.btnShareOffer.disabled = false;
       els.btnGenOffer.textContent = 'Regenerate Offer';
       els.btnGenOffer.disabled = false;
       setStep('step-h1', 'done');
@@ -2229,6 +2234,7 @@
       const signedCode = await buildSignedHandshake(ourSdpCode);
       els.answerOut.value = signedCode;
       els.btnCopyAnswer.disabled = false;
+      els.btnShareAnswer.disabled = false;
       els.btnGenAnswer.textContent = 'Regenerate';
       setStep('step-j1', 'done');
       setStep('step-j2', 'active');
@@ -2268,6 +2274,56 @@
   els.btnCopyOffer.addEventListener('click',  () => copy(els.offerOut.value,  'Offer'));
   els.btnCopyAnswer.addEventListener('click', () => copy(els.answerOut.value, 'Answer'));
 
+  /* ── Share Link ───────────────────────────────────────────────
+     Build a self-contained URL carrying the handshake in the URL
+     hash (#o=<offer> or #a=<answer>). Hash fragments never leave
+     the browser, so the code stays private. ─────────────────────── */
+  const buildShareUrl = (kind, code) => {
+    const base = location.origin + location.pathname;
+    return `${base}#${kind}=${encodeURIComponent(code)}`;
+  };
+  els.btnShareOffer.addEventListener('click', () => {
+    if (!els.offerOut.value) return;
+    copy(buildShareUrl('o', els.offerOut.value), 'Offer link');
+  });
+  els.btnShareAnswer.addEventListener('click', () => {
+    if (!els.answerOut.value) return;
+    copy(buildShareUrl('a', els.answerOut.value), 'Answer link');
+  });
+
+  /* ── Hash auto-apply ──────────────────────────────────────────
+     If the URL hash contains a handshake (opened via a shared
+     link), auto-fill the correct field and trigger the flow. ────── */
+  const applyHashHandshake = () => {
+    const raw = location.hash.replace(/^#/, '');
+    if (!raw) return false;
+    const m = raw.match(/^(o|a)=(.+)$/);
+    if (!m) return false;
+    const kind = m[1];
+    let code;
+    try { code = decodeURIComponent(m[2]); } catch { return false; }
+    if (!code || code.length < 100) return false;
+    // Clear the hash so it isn't re-applied on reload
+    history.replaceState(null, '', location.pathname + location.search);
+    if (kind === 'o') {
+      setRole('joiner');
+      els.offerIn.value = code;
+      els.offerIn.dispatchEvent(new Event('input'));
+      toast('Offer loaded from link — generating answer…');
+      setTimeout(() => { if (!els.btnGenAnswer.disabled) els.btnGenAnswer.click(); }, 200);
+    } else {
+      // Answer link — host must already have pc alive from their offer
+      els.answerIn.value = code;
+      els.answerIn.dispatchEvent(new Event('input'));
+      if (!pc) {
+        toast('Answer link loaded but no active offer — generate an offer first', true);
+      } else {
+        toast('Answer loaded from link');
+      }
+    }
+    return true;
+  };
+
   /* ── Reset ────────────────────────────────────────────────── */
   els.btnReset.addEventListener('click', () => {
     endCallLocal();
@@ -2285,7 +2341,7 @@
     els.peerPill.classList.remove('connected', 'trusted');
 
     ['offerOut','offerIn','answerOut','answerIn'].forEach(id => els[id].value = '');
-    [els.btnCopyOffer, els.btnCopyAnswer, els.btnAcceptAnswer, els.btnGenAnswer].forEach(b => b.disabled = true);
+    [els.btnCopyOffer, els.btnCopyAnswer, els.btnShareOffer, els.btnShareAnswer, els.btnAcceptAnswer, els.btnGenAnswer].forEach(b => b.disabled = true);
     els.btnGenOffer.disabled = false;
     els.btnGenOffer.textContent = 'Generate Offer';
     els.btnGenAnswer.textContent = 'Generate Answer';
@@ -2416,8 +2472,10 @@
       if (!myNickname) {
         setTimeout(() => toast('Tip: set a nickname so peers can identify you', false), 800);
       }
+      // If a handshake came in via URL hash (#o= / #a=), use that first
+      const hashUsed = applyHashHandshake();
       // Detect handshake code already on clipboard (best-effort, silent on failure)
-      setTimeout(detectClipboardHandshake, 600);
+      if (!hashUsed) setTimeout(detectClipboardHandshake, 600);
       // Start background watcher if we have trusted peers — catches peer offers
       // that arrive while the app is open and idle
       if (trustedPeers.size > 0) {
