@@ -607,8 +607,36 @@
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   .toast.error { border-color: var(--danger); color: var(--danger); }
 
-  /* Mobile view tabs (hidden on desktop) */
-  .view-tabs { display: none; }
+  /* Empty-state CTA is mobile-only (desktop has the handshake panel visible) */
+  .empty-cta { display: none; }
+  @media (max-width: 900px) { .empty-cta { display: inline-block; } }
+
+  /* Mobile settings button (hidden on desktop) */
+  .settings-btn {
+    display: none;
+    background: transparent; border: 1px solid var(--line);
+    border-radius: 4px; color: var(--text-mid);
+    width: 36px; height: 36px;
+    align-items: center; justify-content: center;
+    cursor: pointer; transition: all 0.15s ease;
+    position: relative;
+  }
+  .settings-btn:hover { color: var(--text); border-color: var(--line-2); }
+  .settings-btn svg { width: 18px; height: 18px; }
+  .settings-btn .alert-dot {
+    position: absolute; top: 6px; right: 6px;
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--danger); opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+  .settings-btn.has-alert .alert-dot { opacity: 1; }
+  .settings-btn .icon-close { display: none; }
+  .settings-btn.open .icon-open { display: none; }
+  .settings-btn.open .icon-close { display: inline; }
+  .settings-btn.open {
+    color: var(--dp-green-bright);
+    border-color: var(--dp-green-bright);
+  }
 
   @media (max-width: 900px) {
     main {
@@ -617,27 +645,7 @@
       min-height: 0;
     }
     .handshake, .chat { flex: 1 1 auto; min-height: 0; }
-    .view-tabs {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 0;
-      border-bottom: 1px solid var(--line); background: var(--bg-1);
-    }
-    .view-tabs button {
-      background: transparent; border: none; color: var(--text-mid);
-      font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em;
-      text-transform: uppercase; padding: 12px 8px; cursor: pointer;
-      border-bottom: 2px solid transparent; transition: all 0.15s ease;
-    }
-    .view-tabs button.active {
-      color: var(--dp-green-bright);
-      border-bottom-color: var(--dp-green-bright);
-    }
-    .view-tabs .dot {
-      display: inline-block; width: 6px; height: 6px; border-radius: 50%;
-      background: var(--dp-green-bright); margin-left: 6px;
-      box-shadow: 0 0 6px var(--dp-green-bright);
-      opacity: 0; transition: opacity 0.2s ease;
-    }
-    .view-tabs button.has-alert .dot { opacity: 1; }
+    .settings-btn { display: inline-flex; }
 
     main[data-view="setup"] .chat { display: none; }
     main[data-view="chat"]  .handshake { display: none; }
@@ -728,6 +736,13 @@
           <span></span><span></span><span></span>
         </span>
       </div>
+
+      <!-- Mobile: toggle setup/handshake drawer -->
+      <button type="button" class="settings-btn" id="btnSettings" aria-label="Open setup" title="Setup">
+        <svg class="icon-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        <span class="alert-dot"></span>
+      </button>
     </div>
   </header>
 
@@ -745,12 +760,7 @@
   </div>
 
   <!-- ───────────────────────── MAIN ───────────────────────── -->
-  <main id="mainView" data-view="setup">
-
-    <nav class="view-tabs" aria-label="View switcher">
-      <button type="button" id="tabSetup" class="active" data-view="setup">Setup</button>
-      <button type="button" id="tabChat" data-view="chat">Chat<span class="dot"></span></button>
-    </nav>
+  <main id="mainView" data-view="chat">
 
     <aside class="handshake">
       <h1 class="panel-title">Manual Handshake</h1>
@@ -894,7 +904,8 @@
         <div class="empty-state" id="emptyState">
           <div class="glyph">∞</div>
           <h2>Awaiting Channel</h2>
-          <p>Complete the handshake on the left to establish a direct, encrypted connection between you and your peer.</p>
+          <p>Complete the handshake to establish a direct, encrypted connection between you and your peer.</p>
+          <button class="btn btn-primary empty-cta" id="btnOpenSetup" type="button" style="margin-top:14px;">Set Up Connection</button>
           <div class="security-note">
             <strong>END-TO-END ENCRYPTED</strong><br>
             Text, files, and voice are secured by WebRTC's mandatory DTLS-SRTP layer. Nothing passes through any server. The data flows directly between the two devices.
@@ -1008,8 +1019,7 @@
     btnShareOffer:  $('btnShareOffer'),
     btnShareAnswer: $('btnShareAnswer'),
     mainView:      $('mainView'),
-    tabSetup:      $('tabSetup'),
-    tabChat:       $('tabChat'),
+    btnSettings:   $('btnSettings'),
     roomPasscode:  $('roomPasscode'),
     btnJoinRoom:   $('btnJoinRoom'),
     btnLeaveRoom:  $('btnLeaveRoom'),
@@ -1075,18 +1085,25 @@
     els.statusText.textContent = text;
   };
 
-  /* ── Mobile view switcher ────────────────────────────────── */
+  /* ── Mobile view switcher (WhatsApp-style: chat is default,
+     gear opens the setup drawer, X closes it) ──────────────── */
   const setMobileView = (view) => {
     if (!els.mainView) return;
     els.mainView.dataset.view = view;
-    if (els.tabSetup) els.tabSetup.classList.toggle('active', view === 'setup');
-    if (els.tabChat)  els.tabChat.classList.toggle('active', view === 'chat');
-    // Clear alert dot on the tab we just switched to
-    if (view === 'chat' && els.tabChat) els.tabChat.classList.remove('has-alert');
-    if (view === 'setup' && els.tabSetup) els.tabSetup.classList.remove('has-alert');
+    if (els.btnSettings) {
+      els.btnSettings.classList.toggle('open', view === 'setup');
+      els.btnSettings.setAttribute('aria-label', view === 'setup' ? 'Close setup' : 'Open setup');
+      if (view === 'chat') els.btnSettings.classList.remove('has-alert');
+    }
   };
-  if (els.tabSetup) els.tabSetup.addEventListener('click', () => setMobileView('setup'));
-  if (els.tabChat)  els.tabChat.addEventListener('click',  () => setMobileView('chat'));
+  if (els.btnSettings) {
+    els.btnSettings.addEventListener('click', () => {
+      const next = els.mainView.dataset.view === 'setup' ? 'chat' : 'setup';
+      setMobileView(next);
+    });
+  }
+  const btnOpenSetup = document.getElementById('btnOpenSetup');
+  if (btnOpenSetup) btnOpenSetup.addEventListener('click', () => setMobileView('setup'));
   const setStep = (id, state) => {
     const el = els[id]; if (!el) return;
     el.classList.remove('active', 'done');
@@ -1922,9 +1939,10 @@
     div.innerHTML = `<div>${escapeHtml(text)}</div><div class="msg-meta">${fmtTime(new Date())}</div>`;
     els.messages.appendChild(div);
     els.messages.scrollTop = els.messages.scrollHeight;
-    // Mobile: flag the Chat tab if user is on Setup when an incoming arrives
+    // Mobile: flag the settings button if user is in Setup drawer when
+    // an incoming message arrives (so they notice there's new chat)
     if (kind === 'incoming' && els.mainView && els.mainView.dataset.view === 'setup') {
-      els.tabChat?.classList.add('has-alert');
+      els.btnSettings?.classList.add('has-alert');
     }
   };
 
