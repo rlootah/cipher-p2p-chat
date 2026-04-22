@@ -47,7 +47,7 @@
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.018 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
     pointer-events: none; z-index: 0; mix-blend-mode: overlay;
   }
-  .app { position: relative; z-index: 1; height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+  .app { position: relative; z-index: 1; height: 100vh; height: 100dvh; display: grid; grid-template-rows: auto 1fr; }
 
   /* ─────────── HEADER ─────────── */
   header {
@@ -607,13 +607,81 @@
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   .toast.error { border-color: var(--danger); color: var(--danger); }
 
+  /* Mobile view tabs (hidden on desktop) */
+  .view-tabs { display: none; }
+
   @media (max-width: 900px) {
-    main { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-    .handshake { max-height: 50vh; border-right: none; border-bottom: 1px solid var(--line); }
-    .messages { padding: 18px; }
-    header { padding: 14px 18px; }
-    .brand-name { font-size: 20px; }
-    .status, .call-pill { padding: 6px 10px; font-size: 10px; }
+    main {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .handshake, .chat { flex: 1 1 auto; min-height: 0; }
+    .view-tabs {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+      border-bottom: 1px solid var(--line); background: var(--bg-1);
+    }
+    .view-tabs button {
+      background: transparent; border: none; color: var(--text-mid);
+      font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em;
+      text-transform: uppercase; padding: 12px 8px; cursor: pointer;
+      border-bottom: 2px solid transparent; transition: all 0.15s ease;
+    }
+    .view-tabs button.active {
+      color: var(--dp-green-bright);
+      border-bottom-color: var(--dp-green-bright);
+    }
+    .view-tabs .dot {
+      display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+      background: var(--dp-green-bright); margin-left: 6px;
+      box-shadow: 0 0 6px var(--dp-green-bright);
+      opacity: 0; transition: opacity 0.2s ease;
+    }
+    .view-tabs button.has-alert .dot { opacity: 1; }
+
+    main[data-view="setup"] .chat { display: none; }
+    main[data-view="chat"]  .handshake { display: none; }
+
+    .handshake {
+      border-right: none; border-bottom: 1px solid var(--line);
+      padding: 18px 16px;
+    }
+    .panel-title { font-size: 18px; margin-bottom: 4px; }
+    .panel-subtitle { font-size: 11px; margin-bottom: 16px; }
+    .room-panel { padding: 12px 14px; margin-bottom: 14px; }
+    .identity-card { padding: 12px 14px; }
+    .mic-card { padding: 10px 12px; margin-bottom: 14px; }
+    .recent-peers { padding: 12px; }
+
+    .messages { padding: 14px 16px; gap: 10px; }
+    .composer { padding: 12px 14px; gap: 8px; }
+    .composer input[type="text"] { padding: 10px 12px; font-size: 14px; }
+
+    header { padding: 10px 14px; gap: 8px; }
+    .brand-name { font-size: 18px; }
+    .brand-sub { font-size: 9px; }
+    .brand-mark { width: 32px; height: 32px; }
+    .status, .call-pill { padding: 5px 9px; font-size: 9px; }
+    .peer-pill { padding: 4px 8px; font-size: 10px; }
+
+    textarea.code { font-size: 11px; min-height: 80px; }
+    .step { margin-bottom: 18px; }
+    .btn { padding: 9px 14px; font-size: 10px; }
+    .btn-row { gap: 8px; }
+
+    /* Empty state scales down */
+    .empty-state .glyph { font-size: 48px; }
+    .empty-state h2 { font-size: 22px; }
+    .empty-state p { font-size: 12px; padding: 0 16px; }
+  }
+
+  @media (max-width: 420px) {
+    .handshake { padding: 14px 12px; }
+    .messages { padding: 12px 12px; }
+    .composer { padding: 10px 12px; }
+    header { padding: 8px 12px; }
+    .header-right { gap: 6px; }
+    .brand-sub { display: none; }
   }
 </style>
 </head>
@@ -677,7 +745,12 @@
   </div>
 
   <!-- ───────────────────────── MAIN ───────────────────────── -->
-  <main>
+  <main id="mainView" data-view="setup">
+
+    <nav class="view-tabs" aria-label="View switcher">
+      <button type="button" id="tabSetup" class="active" data-view="setup">Setup</button>
+      <button type="button" id="tabChat" data-view="chat">Chat<span class="dot"></span></button>
+    </nav>
 
     <aside class="handshake">
       <h1 class="panel-title">Manual Handshake</h1>
@@ -740,7 +813,7 @@
           Share a passcode with your peers. Everyone who enters the same code is paired through our relay.
           The server only sees ciphertext — your messages, keys, and SDP stay private.
         </div>
-        <input class="code" id="roomPasscode" placeholder="e.g. sunset-otter-42" autocomplete="off" spellcheck="false" />
+        <input class="code" id="roomPasscode" placeholder="e.g. sunset-otter-42" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text" />
         <div class="btn-row" style="margin-top:10px;">
           <button class="btn btn-primary" id="btnJoinRoom">Join Room</button>
           <button class="btn" id="btnLeaveRoom" disabled>Leave</button>
@@ -934,6 +1007,9 @@
     btnCopyAnswer: $('btnCopyAnswer'),
     btnShareOffer:  $('btnShareOffer'),
     btnShareAnswer: $('btnShareAnswer'),
+    mainView:      $('mainView'),
+    tabSetup:      $('tabSetup'),
+    tabChat:       $('tabChat'),
     roomPasscode:  $('roomPasscode'),
     btnJoinRoom:   $('btnJoinRoom'),
     btnLeaveRoom:  $('btnLeaveRoom'),
@@ -998,6 +1074,19 @@
     els.status.dataset.state = state;
     els.statusText.textContent = text;
   };
+
+  /* ── Mobile view switcher ────────────────────────────────── */
+  const setMobileView = (view) => {
+    if (!els.mainView) return;
+    els.mainView.dataset.view = view;
+    if (els.tabSetup) els.tabSetup.classList.toggle('active', view === 'setup');
+    if (els.tabChat)  els.tabChat.classList.toggle('active', view === 'chat');
+    // Clear alert dot on the tab we just switched to
+    if (view === 'chat' && els.tabChat) els.tabChat.classList.remove('has-alert');
+    if (view === 'setup' && els.tabSetup) els.tabSetup.classList.remove('has-alert');
+  };
+  if (els.tabSetup) els.tabSetup.addEventListener('click', () => setMobileView('setup'));
+  if (els.tabChat)  els.tabChat.addEventListener('click',  () => setMobileView('chat'));
   const setStep = (id, state) => {
     const el = els[id]; if (!el) return;
     el.classList.remove('active', 'done');
@@ -1692,6 +1781,7 @@
         case 'connecting':   setStatus('connecting', 'Establishing channel…'); break;
         case 'connected':
           setStatus('connected',  'Channel secure');
+          setMobileView('chat');
           // Update lastSeen for trusted peers (don't auto-trust untrusted)
           if (peerIdentityFp && trustedPeers.has(peerIdentityFp)) {
             const e = trustedPeers.get(peerIdentityFp);
@@ -1832,6 +1922,10 @@
     div.innerHTML = `<div>${escapeHtml(text)}</div><div class="msg-meta">${fmtTime(new Date())}</div>`;
     els.messages.appendChild(div);
     els.messages.scrollTop = els.messages.scrollHeight;
+    // Mobile: flag the Chat tab if user is on Setup when an incoming arrives
+    if (kind === 'incoming' && els.mainView && els.mainView.dataset.view === 'setup') {
+      els.tabChat?.classList.add('has-alert');
+    }
   };
 
   const addSystem = (text) => {
