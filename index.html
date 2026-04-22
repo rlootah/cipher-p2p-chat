@@ -2297,8 +2297,26 @@
     }
   });
   els.btnMute.addEventListener('click', toggleMute);
-  els.btnAcceptCall.addEventListener('click', acceptCall);
-  els.btnDeclineCall.addEventListener('click', declineCall);
+  els.btnAcceptCall.addEventListener('click', () => {
+    if (meshInAnyRoom()) {
+      els.callBanner.classList.remove('show');
+      pendingCallInviter = null;
+      meshCallEnter(false); // no re-invite — caller already invited everyone
+    } else {
+      acceptCall();
+    }
+  });
+  els.btnDeclineCall.addEventListener('click', () => {
+    if (meshInAnyRoom()) {
+      els.callBanner.classList.remove('show');
+      if (pendingCallInviter?.dc && pendingCallInviter.dc.readyState === 'open') {
+        try { pendingCallInviter.dc.send(JSON.stringify({ k: 'call-decline' })); } catch {}
+      }
+      pendingCallInviter = null;
+    } else {
+      declineCall();
+    }
+  });
 
   /* ── Composer ─────────────────────────────────────────────── */
   const enableComposer = () => {
@@ -2666,14 +2684,20 @@
     }
   };
 
-  const meshCallEnter = () => {
+  const meshCallEnter = (sendInvite = true) => {
     if (!micStream) { toast('Grant microphone access first', true); return; }
     if (inCall) return;
     inCall = true;
     isMuted = false;
     micStream.getAudioTracks().forEach(t => t.enabled = true);
     if (audioContext && audioContext.state === 'suspended') audioContext.resume().catch(()=>{});
-    addCallEvent(`Broadcasting to ${meshConnectedCount()} peer${meshConnectedCount() > 1 ? 's' : ''}`);
+    if (sendInvite) {
+      meshBroadcastString(JSON.stringify({ k: 'call-invite' }));
+      addCallEvent(`Inviting ${meshConnectedCount()} peer${meshConnectedCount() > 1 ? 's' : ''} to voice`);
+    } else {
+      meshBroadcastString(JSON.stringify({ k: 'call-accept' }));
+      addCallEvent('Joined voice call');
+    }
     updateCallUI();
     startLevelMeter();
   };
@@ -2682,9 +2706,38 @@
     inCall = false;
     isMuted = false;
     if (micStream) micStream.getAudioTracks().forEach(t => t.enabled = false);
+    meshBroadcastString(JSON.stringify({ k: 'call-end' }));
     stopLevelMeter();
-    addCallEvent('Broadcast ended', true);
+    addCallEvent('You left the call', true);
     updateCallUI();
+  };
+
+  // Incoming invite banner state: who invited us (so Accept can send back
+  // a targeted call-accept / Decline a targeted call-decline).
+  let pendingCallInviter = null;
+
+  const meshOnCallInvite = (entry) => {
+    if (inCall) return; // already on air — nothing to do
+    pendingCallInviter = entry;
+    const sub = els.callBanner.querySelector('.text small');
+    if (sub) sub.textContent = `${meshPeerDisplayName(entry)} is inviting you to voice`;
+    els.callBanner.classList.add('show');
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.frequency.value = 880; g.gain.value = 0.04;
+      o.connect(g); g.connect(ctx.destination);
+      o.start(); setTimeout(() => { o.stop(); ctx.close(); }, 220);
+    } catch {}
+  };
+  const meshOnCallAccept = (entry) => {
+    addCallEvent(`${meshPeerDisplayName(entry)} joined the call`);
+  };
+  const meshOnCallDecline = (entry) => {
+    addCallEvent(`${meshPeerDisplayName(entry)} declined`, true);
+  };
+  const meshOnCallEnd = (entry) => {
+    addCallEvent(`${meshPeerDisplayName(entry)} left the call`);
   };
   const meshClearAll = () => {
     for (const peerId of Array.from(meshPeers.keys())) meshRemoveEntry(peerId);
@@ -2846,6 +2899,10 @@
         case 'file-end':
           onFileEnd(msg);
           break;
+        case 'call-invite':  meshOnCallInvite(entry); break;
+        case 'call-accept':  meshOnCallAccept(entry); break;
+        case 'call-decline': meshOnCallDecline(entry); break;
+        case 'call-end':     meshOnCallEnd(entry); break;
         case 'ping':
           break;
       }
