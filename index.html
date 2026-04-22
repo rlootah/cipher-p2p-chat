@@ -2101,7 +2101,9 @@
   /* ── VOICE CALL CONTROLS ──────────────────────────────────── */
 
   const updateCallUI = () => {
-    if (!dc || dc.readyState !== 'open') {
+    const dcOpen = dc && dc.readyState === 'open';
+    const meshOpen = meshConnectedCount() > 0;
+    if (!dcOpen && !meshOpen) {
       els.callPill.style.display = 'none';
       return;
     }
@@ -2133,8 +2135,9 @@
     stopLevelMeter();
     try {
       audioContext = audioContext || new (window.AudioContext || window.webkitAudioContext)();
-      // Prefer remote stream so user sees peer activity
-      const stream = els.remoteAudio.srcObject;
+      // Prefer remote stream (legacy 1:1); fall back to local mic (mesh)
+      // so the user still sees their own broadcast level when in a group.
+      const stream = els.remoteAudio.srcObject || micStream;
       if (!stream) return;
       const source = audioContext.createMediaStreamSource(stream);
       analyser = audioContext.createAnalyser();
@@ -2285,8 +2288,13 @@
   };
 
   els.btnCall.addEventListener('click', () => {
-    if (inCall || els.callLabel.textContent === 'Calling…') endCall();
-    else startCall();
+    if (meshInAnyRoom()) {
+      if (inCall) meshCallExit();
+      else meshCallEnter();
+    } else {
+      if (inCall || els.callLabel.textContent === 'Calling…') endCall();
+      else startCall();
+    }
   });
   els.btnMute.addEventListener('click', toggleMute);
   els.btnAcceptCall.addEventListener('click', acceptCall);
@@ -2622,6 +2630,7 @@
     else if (n === 1) setStatus('connected',  'Channel secure · 1 peer');
     else              setStatus('connected', `Channel secure · ${n} peers`);
     updateMeshHeaderPill();
+    updateCallUI();
   };
 
   const meshAddEntry = (peerId, outgoing) => {
@@ -2641,12 +2650,41 @@
     if (!entry) return;
     try { if (entry.dc) entry.dc.close(); } catch {}
     try { if (entry.pc) entry.pc.close(); } catch {}
+    if (entry.audioEl) {
+      try { entry.audioEl.srcObject = null; entry.audioEl.remove(); } catch {}
+      entry.audioEl = null;
+    }
     meshPeers.delete(peerId);
-    if (meshConnectedCount() === 0 && !dc) disableComposer();
+    if (meshConnectedCount() === 0 && !dc) {
+      disableComposer();
+      // If we were in a mesh call and everyone left, drop out of call state.
+      if (inCall && !dc) meshCallExit();
+    }
     updateMeshStatus();
     if (meshPeers.size === 0 && !pc) {
       els.peerPill.classList.remove('connected', 'trusted');
     }
+  };
+
+  const meshCallEnter = () => {
+    if (!micStream) { toast('Grant microphone access first', true); return; }
+    if (inCall) return;
+    inCall = true;
+    isMuted = false;
+    micStream.getAudioTracks().forEach(t => t.enabled = true);
+    if (audioContext && audioContext.state === 'suspended') audioContext.resume().catch(()=>{});
+    addCallEvent(`Broadcasting to ${meshConnectedCount()} peer${meshConnectedCount() > 1 ? 's' : ''}`);
+    updateCallUI();
+    startLevelMeter();
+  };
+  const meshCallExit = () => {
+    if (!inCall) return;
+    inCall = false;
+    isMuted = false;
+    if (micStream) micStream.getAudioTracks().forEach(t => t.enabled = false);
+    stopLevelMeter();
+    addCallEvent('Broadcast ended', true);
+    updateCallUI();
   };
   const meshClearAll = () => {
     for (const peerId of Array.from(meshPeers.keys())) meshRemoveEntry(peerId);
@@ -2675,10 +2713,35 @@
     };
     conn.ondatachannel = (ev) => meshAttachDC(entry, ev.channel);
 
-    // Pre-create an audio transceiver so the SDP carries audio capability.
-    // Voice mesh is not wired yet — tracks stay off.
-    try { conn.addTransceiver('audio', { direction: 'recvonly' }); }
-    catch (e) { console.warn('addTransceiver audio failed', e); }
+    // Voice: if the mic is granted, add the track to this connection
+    // (disabled by default — flipping micStream track.enabled broadcasts
+    // to every peer at once). Without mic we add a recvonly transceiver
+    // so we can still HEAR others.
+    if (micStream) {
+      try {
+        const track = micStream.getAudioTracks()[0];
+        entry.audioSender = conn.addTrack(track, micStream);
+      } catch (e) { console.warn('addTrack audio failed', e); }
+    } else {
+      try { conn.addTransceiver('audio', { direction: 'recvonly' }); }
+      catch (e) { console.warn('addTransceiver audio failed', e); }
+    }
+
+    // Remote audio: one hidden <audio> element per peer so every remote
+    // voice plays through the browser's mixer simultaneously.
+    conn.ontrack = (ev) => {
+      const [stream] = ev.streams;
+      if (!stream) return;
+      if (!entry.audioEl) {
+        const el = document.createElement('audio');
+        el.autoplay = true;
+        el.playsInline = true;
+        el.style.display = 'none';
+        document.body.appendChild(el);
+        entry.audioEl = el;
+      }
+      entry.audioEl.srcObject = stream;
+    };
 
     return conn;
   };

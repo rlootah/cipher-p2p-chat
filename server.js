@@ -50,7 +50,7 @@ const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 256 * 1024 })
 
 // room -> Map<peerId, ws>
 const rooms = new Map();
-const ROOM_MAX = 8;
+const ROOM_MAX = 6;
 
 function send(ws, obj) {
   if (ws.readyState !== 1) return;
