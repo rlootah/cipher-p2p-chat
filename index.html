@@ -1948,13 +1948,14 @@
   };
 
   /* ── Message rendering ────────────────────────────────────── */
-  const addMessage = (kind, text) => {
+  const addMessage = (kind, text, senderOverride) => {
     els.emptyState?.remove();
     const div = document.createElement('div');
     div.className = `msg ${kind}`;
-    const sender = kind === 'outgoing'
-      ? (myNickname || 'You')
-      : (peerDisplayName() || 'Peer');
+    let sender;
+    if (senderOverride) sender = senderOverride;
+    else if (kind === 'outgoing') sender = myNickname || 'You';
+    else sender = peerDisplayName() || 'Peer';
     div.innerHTML =
       `<span class="msg-sender">${escapeHtml(sender)}</span>` +
       `<div>${escapeHtml(text)}</div>` +
@@ -1989,12 +1990,17 @@
     els.messages.scrollTop = els.messages.scrollHeight;
   };
 
-  const addFileMessage = (kind, name, size, id) => {
+  const addFileMessage = (kind, name, size, id, senderOverride) => {
     els.emptyState?.remove();
     const div = document.createElement('div');
     div.className = `msg file ${kind}`;
     div.dataset.fileId = id;
+    let sender;
+    if (senderOverride) sender = senderOverride;
+    else if (kind === 'outgoing') sender = myNickname || 'You';
+    else sender = peerDisplayName() || 'Peer';
     div.innerHTML = `
+      <span class="msg-sender" style="padding:10px 14px 0;">${escapeHtml(sender)}</span>
       <div class="file-card">
         <div class="file-icon">${name.split('.').pop().slice(0,3).toUpperCase() || 'FIL'}</div>
         <div class="file-info">
@@ -2026,7 +2032,30 @@
 
   /* ── File transfer ────────────────────────────────────────── */
   const CHUNK_SIZE = 16 * 1024;
+  const sendFileMesh = async (file) => {
+    if (meshConnectedCount() === 0) return;
+    const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+    meshBroadcastString(JSON.stringify({ k: 'file-meta', id, name: file.name, size: file.size, type: file.type }));
+    const msgEl = addFileMessage('outgoing', file.name, file.size, id);
+    const idBytes = new TextEncoder().encode(id);
+    const headerLen = 1 + idBytes.length;
+    let offset = 0;
+    while (offset < file.size) {
+      await meshWaitForDrain();
+      const slice = file.slice(offset, offset + CHUNK_SIZE);
+      const buf = await slice.arrayBuffer();
+      const out = new Uint8Array(headerLen + buf.byteLength);
+      out[0] = idBytes.length; out.set(idBytes, 1); out.set(new Uint8Array(buf), headerLen);
+      meshBroadcastBinary(out.buffer);
+      offset += buf.byteLength;
+      updateFileProgress(msgEl, offset, file.size);
+    }
+    meshBroadcastString(JSON.stringify({ k: 'file-end', id }));
+    finishFileMessage(msgEl, file, file.name);
+  };
+
   const sendFile = async (file) => {
+    if (meshInAnyRoom()) return sendFileMesh(file);
     if (!dc || dc.readyState !== 'open') return;
     const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
     dc.send(JSON.stringify({ k: 'file-meta', id, name: file.name, size: file.size, type: file.type }));
@@ -2053,8 +2082,8 @@
     dc.send(JSON.stringify({ k: 'file-end', id }));
     finishFileMessage(msgEl, file, file.name);
   };
-  const onFileMeta = (msg) => {
-    const msgEl = addFileMessage('incoming', msg.name, msg.size, msg.id);
+  const onFileMeta = (msg, senderName) => {
+    const msgEl = addFileMessage('incoming', msg.name, msg.size, msg.id, senderName);
     incomingFiles.set(msg.id, { name: msg.name, size: msg.size, type: msg.type, chunks: [], received: 0, msgEl });
   };
   const onFileChunk = (id, chunk) => {
@@ -2535,68 +2564,277 @@
     try { if (dc) dc.close(); } catch {}
     try { if (pc) pc.close(); } catch {}
     pc = null; dc = null;
+    meshClearAll();
   };
 
-  const roomStartHostHandshake = async (toPeerId) => {
-    setStatus('connecting', 'Preparing offer…');
-    setRoomStatus('Peer joined — sending offer', 'active');
-    if (micPermission === 'unknown') { try { await requestMic(); } catch {} }
+  /* ── Mesh layer (N-peer full mesh over the room relay) ───────
+     Each room member keeps a pairwise RTCPeerConnection + data
+     channel to every other member. Text and files are fanned out
+     across all open channels; each incoming message is labelled
+     with that specific peer's nickname/fingerprint. Voice stays
+     1:1 for now — it's disabled while the mesh is active. ───── */
+  const meshPeers = new Map(); // peerId -> entry
 
-    pc = buildPC();
-    dc = pc.createDataChannel('cipher', { ordered: true });
-    attachDataChannel(dc);
+  const meshInAnyRoom  = () => meshPeers.size > 0;
+  const meshConnectedCount = () => {
+    let n = 0;
+    for (const [, e] of meshPeers) if (e.dc && e.dc.readyState === 'open') n++;
+    return n;
+  };
+  const meshPeerDisplayName = (entry) => {
+    if (!entry) return 'peer';
+    if (entry.nickname) return entry.nickname;
+    if (entry.identityFp) {
+      const t = trustedPeers.get(entry.identityFp);
+      if (t?.nickname) return t.nickname;
+      return entry.identityFp.slice(0, 11);
+    }
+    return 'peer';
+  };
+  const firstOpenMeshPeer = () => {
+    for (const [, e] of meshPeers) if (e.dc && e.dc.readyState === 'open') return e;
+    return null;
+  };
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await waitForIceComplete(pc);
+  const updateMeshHeaderPill = () => {
+    const n = meshConnectedCount();
+    if (n === 0) {
+      if (!pc) els.peerPill.classList.remove('connected', 'trusted');
+      return;
+    }
+    els.peerPill.classList.add('connected');
+    els.peerPill.classList.remove('trusted');
+    if (n === 1) {
+      const e = firstOpenMeshPeer();
+      els.peerName.textContent = meshPeerDisplayName(e);
+      els.peerAvatar.textContent = (meshPeerDisplayName(e)[0] || '?').toUpperCase();
+      els.peerTrust.textContent = 'peer';
+    } else {
+      els.peerName.textContent = `Group · ${n}`;
+      els.peerAvatar.textContent = String(n);
+      els.peerTrust.textContent = 'group';
+    }
+  };
+  const updateMeshStatus = () => {
+    const n = meshConnectedCount();
+    if (meshPeers.size === 0) return;
+    if (n === 0)      setStatus('connecting', 'Connecting to peers…');
+    else if (n === 1) setStatus('connected',  'Channel secure · 1 peer');
+    else              setStatus('connected', `Channel secure · ${n} peers`);
+    updateMeshHeaderPill();
+  };
 
-    const sdpCode = await encodeSDP(pc.localDescription);
+  const meshAddEntry = (peerId, outgoing) => {
+    let entry = meshPeers.get(peerId);
+    if (entry) return entry;
+    entry = {
+      peerId, outgoing,
+      pc: null, dc: null,
+      identityFp: null, nickname: null,
+      pendingCandidates: [], remoteDescSet: false,
+    };
+    meshPeers.set(peerId, entry);
+    return entry;
+  };
+  const meshRemoveEntry = (peerId) => {
+    const entry = meshPeers.get(peerId);
+    if (!entry) return;
+    try { if (entry.dc) entry.dc.close(); } catch {}
+    try { if (entry.pc) entry.pc.close(); } catch {}
+    meshPeers.delete(peerId);
+    if (meshConnectedCount() === 0 && !dc) disableComposer();
+    updateMeshStatus();
+    if (meshPeers.size === 0 && !pc) {
+      els.peerPill.classList.remove('connected', 'trusted');
+    }
+  };
+  const meshClearAll = () => {
+    for (const peerId of Array.from(meshPeers.keys())) meshRemoveEntry(peerId);
+  };
+
+  const meshBuildPC = (entry) => {
+    const conn = new RTCPeerConnection(RTC_CONFIG);
+
+    conn.onicecandidate = (ev) => {
+      if (!ev.candidate) return;
+      roomSignal(entry.peerId, { kind: 'candidate', data: ev.candidate.toJSON() })
+        .catch(err => console.warn('candidate send failed', err));
+    };
+    conn.onconnectionstatechange = () => {
+      const s = conn.connectionState;
+      if (s === 'connected') {
+        updateMeshStatus();
+        updateNicknameLockUI();
+      } else if (s === 'disconnected' || s === 'failed' || s === 'closed') {
+        if (meshPeers.has(entry.peerId)) {
+          addSystem(`${meshPeerDisplayName(entry)} disconnected`);
+          meshRemoveEntry(entry.peerId);
+          updateNicknameLockUI();
+        }
+      }
+    };
+    conn.ondatachannel = (ev) => meshAttachDC(entry, ev.channel);
+
+    // Pre-create an audio transceiver so the SDP carries audio capability.
+    // Voice mesh is not wired yet — tracks stay off.
+    try { conn.addTransceiver('audio', { direction: 'recvonly' }); }
+    catch (e) { console.warn('addTransceiver audio failed', e); }
+
+    return conn;
+  };
+
+  const meshAttachDC = (entry, channel) => {
+    entry.dc = channel;
+    channel.binaryType = 'arraybuffer';
+    channel.bufferedAmountLowThreshold = 256 * 1024;
+
+    channel.onopen = () => {
+      els.emptyState?.remove();
+      enableComposer();
+      setMobileView('chat');
+      addSystem(`${meshPeerDisplayName(entry)} joined`);
+      updateMeshStatus();
+      updateNicknameLockUI();
+    };
+    channel.onclose = () => {
+      if (meshConnectedCount() === 0 && !dc) disableComposer();
+      updateMeshStatus();
+    };
+    channel.onerror = (e) => console.warn('mesh dc error', entry.peerId, e);
+    channel.onmessage = (ev) => meshHandleIncoming(entry, ev.data);
+  };
+
+  const meshFlushCandidates = async (entry) => {
+    while (entry.pendingCandidates.length) {
+      const c = entry.pendingCandidates.shift();
+      try { await entry.pc.addIceCandidate(c); }
+      catch (e) { console.warn('addIceCandidate failed', e); }
+    }
+  };
+
+  const meshInitiate = async (peerId) => {
+    const entry = meshAddEntry(peerId, true);
+    if (entry.pc) return;
+    entry.pc = meshBuildPC(entry);
+    const ch = entry.pc.createDataChannel('cipher', { ordered: true });
+    meshAttachDC(entry, ch);
+    const offer = await entry.pc.createOffer();
+    await entry.pc.setLocalDescription(offer);
+    const sdpCode = await encodeSDP(entry.pc.localDescription);
     const signed = await buildSignedHandshake(sdpCode);
-    await roomSignal(toPeerId, { kind: 'offer', data: signed });
-    setStatus('connecting', 'Awaiting answer…');
-    setRoomStatus('Offer sent — awaiting answer', 'active');
+    await roomSignal(peerId, { kind: 'offer', data: signed });
+  };
+
+  const meshAcceptOffer = async (peerId, signedOffer) => {
+    const entry = meshAddEntry(peerId, false);
+    if (!entry.pc) entry.pc = meshBuildPC(entry);
+    const { sdpCode, peerFp, peerNick } = await verifySignedHandshake(signedOffer);
+    entry.identityFp = peerFp;
+    if (peerNick) entry.nickname = peerNick;
+    const offerDesc = await decodeSDP(sdpCode);
+    await entry.pc.setRemoteDescription(offerDesc);
+    entry.remoteDescSet = true;
+    await meshFlushCandidates(entry);
+
+    const answer = await entry.pc.createAnswer();
+    await entry.pc.setLocalDescription(answer);
+    const ourSdpCode = await encodeSDP(entry.pc.localDescription);
+    const signedAns = await buildSignedHandshake(ourSdpCode);
+    await roomSignal(peerId, { kind: 'answer', data: signedAns });
+  };
+
+  const meshHandleAnswer = async (peerId, signedAnswer) => {
+    const entry = meshPeers.get(peerId);
+    if (!entry || !entry.pc) return;
+    const { sdpCode, peerFp, peerNick } = await verifySignedHandshake(signedAnswer);
+    entry.identityFp = peerFp;
+    if (peerNick) entry.nickname = peerNick;
+    const desc = await decodeSDP(sdpCode);
+    await entry.pc.setRemoteDescription(desc);
+    entry.remoteDescSet = true;
+    await meshFlushCandidates(entry);
+  };
+
+  const meshHandleCandidate = async (peerId, cand) => {
+    const entry = meshPeers.get(peerId);
+    if (!entry || !entry.pc) return;
+    if (!entry.remoteDescSet) { entry.pendingCandidates.push(cand); return; }
+    try { await entry.pc.addIceCandidate(cand); }
+    catch (e) { console.warn('addIceCandidate failed', e); }
+  };
+
+  const meshHandleIncoming = (entry, data) => {
+    lastPeerActivity = Date.now();
+    const displayName = meshPeerDisplayName(entry);
+    if (typeof data === 'string') {
+      let msg;
+      try { msg = JSON.parse(data); }
+      catch { return addMessage('incoming', data, displayName); }
+      switch (msg.k) {
+        case 'txt':
+          addMessage('incoming', msg.b, displayName);
+          if (els.mainView?.dataset.view === 'setup') {
+            els.btnSettings?.classList.add('has-alert');
+          }
+          break;
+        case 'file-meta':
+          onFileMeta(msg, displayName);
+          break;
+        case 'file-end':
+          onFileEnd(msg);
+          break;
+        case 'ping':
+          break;
+      }
+    } else {
+      const view = new DataView(data);
+      const idLen = view.getUint8(0);
+      const idBytes = new Uint8Array(data, 1, idLen);
+      const id = new TextDecoder().decode(idBytes);
+      const chunk = data.slice(1 + idLen);
+      onFileChunk(id, chunk);
+    }
+  };
+
+  const meshBroadcastString = (s) => {
+    let n = 0;
+    for (const [, e] of meshPeers) {
+      if (e.dc && e.dc.readyState === 'open') {
+        try { e.dc.send(s); n++; } catch {}
+      }
+    }
+    return n;
+  };
+  const meshBroadcastBinary = (buf) => {
+    let n = 0;
+    for (const [, e] of meshPeers) {
+      if (e.dc && e.dc.readyState === 'open') {
+        try { e.dc.send(buf); n++; } catch {}
+      }
+    }
+    return n;
+  };
+  const meshWaitForDrain = async () => {
+    const waiters = [];
+    for (const [, e] of meshPeers) {
+      if (!e.dc || e.dc.readyState !== 'open') continue;
+      if (e.dc.bufferedAmount > 8 * 1024 * 1024) {
+        const ch = e.dc;
+        waiters.push(new Promise(res => {
+          const handler = () => { ch.removeEventListener('bufferedamountlow', handler); res(); };
+          ch.addEventListener('bufferedamountlow', handler);
+        }));
+      }
+    }
+    if (waiters.length) await Promise.all(waiters);
   };
 
   const handleRoomSignal = async (fromPeerId, payload) => {
     if (!payload || typeof payload.kind !== 'string') return;
-
-    if (payload.kind === 'offer') {
-      // We're the joiner: build answer
-      roomRole = 'joiner';
-      setStatus('connecting', 'Offer received — answering…');
-      setRoomStatus('Building answer', 'active');
-      if (micPermission === 'unknown') { try { await requestMic(); } catch {} }
-
-      const { sdpCode, peerFp, peerNick } = await verifySignedHandshake(payload.data);
-      peerIdentityFp = peerFp;
-      peerSelfNickname = peerNick;
-
-      pc = buildPC();
-      const offerDesc = await decodeSDP(sdpCode);
-      await pc.setRemoteDescription(offerDesc);
-
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      await waitForIceComplete(pc);
-
-      const ourSdpCode = await encodeSDP(pc.localDescription);
-      const signedAns = await buildSignedHandshake(ourSdpCode);
-      await roomSignal(fromPeerId, { kind: 'answer', data: signedAns });
-      setStatus('connecting', 'Answer sent — connecting…');
-      setRoomStatus('Answer sent — connecting', 'active');
-      return;
-    }
-
-    if (payload.kind === 'answer') {
-      if (!pc) return;
-      setRoomStatus('Answer received — connecting', 'active');
-      const { sdpCode, peerFp, peerNick } = await verifySignedHandshake(payload.data);
-      peerIdentityFp = peerFp;
-      peerSelfNickname = peerNick;
-      const desc = await decodeSDP(sdpCode);
-      await pc.setRemoteDescription(desc);
-      setStatus('connecting', 'Connecting…');
-      return;
+    switch (payload.kind) {
+      case 'offer':     return meshAcceptOffer(fromPeerId, payload.data);
+      case 'answer':    return meshHandleAnswer(fromPeerId, payload.data);
+      case 'candidate': return meshHandleCandidate(fromPeerId, payload.data);
     }
   };
 
@@ -2609,8 +2847,7 @@
     roomKey = null;
     roomIdHex = null;
     myRoomPeerId = null;
-    roomPeers.clear();
-    roomRole = null;
+    meshClearAll();
     if (els.btnJoinRoom) {
       els.btnJoinRoom.disabled = false;
       els.btnJoinRoom.textContent = 'Join Room';
@@ -2628,8 +2865,6 @@
     const { id, key } = await deriveRoom(passcode);
     roomIdHex = id;
     roomKey = key;
-    roomPeers.clear();
-    roomRole = null;
 
     const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
     setRoomStatus('Connecting to relay…', 'active');
@@ -2676,41 +2911,33 @@
         if (msg.type === 'joined') {
           myRoomPeerId = msg.peerId;
           const existing = Array.isArray(msg.peers) ? msg.peers : [];
-          for (const p of existing) roomPeers.add(p);
           if (existing.length === 0) {
-            setRoomStatus('Room ready — waiting for peer', 'active');
-            setStatus('connecting', 'Waiting for peer…');
-            toast('Room ready — share the passcode with your peer');
-          } else if (existing.length === 1) {
-            // Someone else was already here; they will initiate as host.
-            roomRole = 'joiner';
-            setRoomStatus('Peer found — awaiting offer', 'active');
-            setStatus('connecting', 'Peer found — awaiting offer…');
+            setRoomStatus('Room ready — waiting for peers', 'active');
+            setStatus('connecting', 'Waiting for peers…');
+            toast('Room ready — share the passcode with your peers');
           } else {
-            // Pair is already formed; this client can't join.
-            toast('Room is full (2 people max for now)', true);
-            setRoomStatus('Room full — try another passcode', 'error');
-            roomLeave();
+            setRoomStatus(`Connecting to ${existing.length} peer${existing.length > 1 ? 's' : ''}`, 'active');
+            setStatus('connecting', 'Building mesh…');
+            // Newcomer always initiates to existing members.
+            for (const pid of existing) {
+              meshInitiate(pid).catch(e => {
+                console.error('mesh initiate failed', pid, e);
+                toast('Handshake failed for a peer', true);
+              });
+            }
           }
         } else if (msg.type === 'peer-joined') {
           if (typeof msg.peerId !== 'string') return;
-          roomPeers.add(msg.peerId);
-          // If we were alone we are host for this pairing.
-          if (!roomRole && !pc) {
-            roomRole = 'host';
-            try {
-              await roomStartHostHandshake(msg.peerId);
-            } catch (e) {
-              console.error(e);
-              toast('Handshake failed', true);
-              setRoomStatus('Handshake failed', 'error');
-            }
-          }
+          setRoomStatus('New peer joining…', 'active');
+          // They will initiate to us; we wait for their offer.
         } else if (msg.type === 'peer-left') {
-          roomPeers.delete(msg.peerId);
-          if (roomPeers.size === 0) {
-            setRoomStatus('Peer left — waiting…', '');
-          }
+          if (typeof msg.peerId !== 'string') return;
+          const entry = meshPeers.get(msg.peerId);
+          const name = entry ? meshPeerDisplayName(entry) : 'peer';
+          meshRemoveEntry(msg.peerId);
+          addSystem(`${name} left the room`);
+          if (meshPeers.size === 0) setRoomStatus('Waiting for peers…', '');
+          else setRoomStatus(`${meshConnectedCount()} peer${meshConnectedCount() > 1 ? 's' : ''} connected`, 'active');
         } else if (msg.type === 'signal') {
           if (typeof msg.from !== 'string' || typeof msg.payload !== 'string') return;
           try {
@@ -2994,8 +3221,15 @@
   /* ── Send text ────────────────────────────────────────────── */
   const sendText = () => {
     const text = els.textInput.value.trim();
-    if (!text || !dc || dc.readyState !== 'open') return;
-    dc.send(JSON.stringify({ k: 'txt', b: text }));
+    if (!text) return;
+    const payload = JSON.stringify({ k: 'txt', b: text });
+    if (meshInAnyRoom()) {
+      const n = meshBroadcastString(payload);
+      if (n === 0) { toast('No peers connected', true); return; }
+    } else {
+      if (!dc || dc.readyState !== 'open') return;
+      dc.send(payload);
+    }
     addMessage('outgoing', text);
     els.textInput.value = '';
   };
