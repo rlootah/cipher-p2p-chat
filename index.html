@@ -354,6 +354,11 @@
   }
   .identity-card .id-nickname-edit:hover { color: var(--dp-green-bright); }
   .identity-card .id-nickname-edit svg { width: 12px; height: 12px; color: inherit; }
+  .identity-card .id-nickname-edit:disabled {
+    opacity: 0.35; cursor: not-allowed;
+  }
+  .identity-card .id-nickname-edit:disabled:hover { color: var(--text-dim); }
+  .identity-card .id-nickname.locked { opacity: 0.75; }
   .identity-card .id-fingerprint {
     font-family: var(--mono); font-size: 11px; color: var(--dp-green-bright);
     margin-top: 4px; word-break: break-all; line-height: 1.4;
@@ -526,6 +531,13 @@
     font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em;
     opacity: 0.55; margin-top: 4px; text-transform: uppercase;
   }
+  .msg-sender {
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.15em;
+    text-transform: uppercase; opacity: 0.75; margin-bottom: 4px;
+    display: block;
+  }
+  .msg.outgoing .msg-sender { color: var(--dp-green-bright); text-align: right; }
+  .msg.incoming .msg-sender { color: var(--dp-green-bright); }
   .msg.file { padding: 0; overflow: hidden; }
   .msg.file .file-card {
     padding: 12px 14px; display: flex; align-items: center; gap: 12px;
@@ -1799,6 +1811,7 @@
         case 'connected':
           setStatus('connected',  'Channel secure');
           setMobileView('chat');
+          updateNicknameLockUI();
           // Update lastSeen for trusted peers (don't auto-trust untrusted)
           if (peerIdentityFp && trustedPeers.has(peerIdentityFp)) {
             const e = trustedPeers.get(peerIdentityFp);
@@ -1808,12 +1821,15 @@
           }
           break;
         case 'disconnected': setStatus('disconnected', 'Disconnected');
-                             addSystem('Peer disconnected'); disableComposer(); endCallLocal(); break;
+                             addSystem('Peer disconnected'); disableComposer(); endCallLocal();
+                             updateNicknameLockUI(); break;
         case 'failed':       setStatus('failed',     'Connection failed');
                              addSystem('Connection failed'); disableComposer(); endCallLocal();
-                             toast('Connection failed', true); break;
+                             toast('Connection failed', true);
+                             updateNicknameLockUI(); break;
         case 'closed':       setStatus('disconnected', 'Disconnected');
-                             disableComposer(); endCallLocal(); break;
+                             disableComposer(); endCallLocal();
+                             updateNicknameLockUI(); break;
       }
     };
 
@@ -1936,7 +1952,13 @@
     els.emptyState?.remove();
     const div = document.createElement('div');
     div.className = `msg ${kind}`;
-    div.innerHTML = `<div>${escapeHtml(text)}</div><div class="msg-meta">${fmtTime(new Date())}</div>`;
+    const sender = kind === 'outgoing'
+      ? (myNickname || 'You')
+      : (peerDisplayName() || 'Peer');
+    div.innerHTML =
+      `<span class="msg-sender">${escapeHtml(sender)}</span>` +
+      `<div>${escapeHtml(text)}</div>` +
+      `<div class="msg-meta">${fmtTime(new Date())}</div>`;
     els.messages.appendChild(div);
     els.messages.scrollTop = els.messages.scrollHeight;
     // Mobile: flag the settings button if user is in Setup drawer when
@@ -2596,6 +2618,7 @@
     if (els.btnLeaveRoom) els.btnLeaveRoom.disabled = true;
     if (els.roomPasscode) els.roomPasscode.disabled = false;
     if (reason) setRoomStatus(reason);
+    updateNicknameLockUI();
   };
 
   const roomJoin = async (passcode) => {
@@ -2627,6 +2650,7 @@
       ws.onopen = () => {
         if (settled) return; settled = true;
         ws.send(JSON.stringify({ type: 'join', room: roomIdHex }));
+        updateNicknameLockUI();
         resolve();
       };
       ws.onerror = () => onFail(new Error('relay error'));
@@ -3021,7 +3045,31 @@
   });
 
   /* ── Edit my own nickname ─────────────────────────────────── */
+  const isInActiveRoom = () => {
+    if (roomWS && roomWS.readyState === 1) return true;
+    if (pc && (pc.connectionState === 'connected' || pc.connectionState === 'connecting')) return true;
+    return false;
+  };
+
+  const updateNicknameLockUI = () => {
+    const locked = isInActiveRoom();
+    if (els.btnEditNickname) {
+      els.btnEditNickname.disabled = locked;
+      els.btnEditNickname.title = locked
+        ? 'Leave the room to change your nickname'
+        : 'Edit nickname';
+    }
+    if (els.myNickname) {
+      els.myNickname.classList.toggle('locked', locked);
+      els.myNickname.style.cursor = locked ? 'not-allowed' : '';
+    }
+  };
+
   els.btnEditNickname.addEventListener('click', async () => {
+    if (isInActiveRoom()) {
+      toast('Leave the room first to change your nickname', true);
+      return;
+    }
     const current = myNickname || '';
     const next = prompt('Set your nickname (visible to peers you connect with):', current);
     if (next === null) return; // cancelled
