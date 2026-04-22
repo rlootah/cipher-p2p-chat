@@ -231,6 +231,36 @@
   .mic-card.denied { border-left-color: var(--danger); }
   .mic-card.denied svg { color: var(--danger); }
 
+  /* Room passcode card */
+  .room-panel {
+    background: var(--bg-2); border: 1px solid var(--line);
+    border-left: 3px solid var(--dp-green-bright); border-radius: 4px;
+    padding: 14px 16px; margin-bottom: 18px;
+  }
+  .room-panel .room-title {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--text); margin-bottom: 4px;
+  }
+  .room-panel .room-sub {
+    font-size: 11px; color: var(--text-mid); line-height: 1.5;
+    margin-bottom: 10px;
+  }
+  .room-panel input.code {
+    width: 100%; box-sizing: border-box;
+    background: var(--bg-1); border: 1px solid var(--line);
+    color: var(--text); font-family: var(--mono); font-size: 12px;
+    padding: 9px 11px; border-radius: 3px; outline: none;
+    letter-spacing: 0.05em;
+  }
+  .room-panel input.code:focus { border-color: var(--dp-green-bright); }
+  .room-panel .room-status {
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.15em;
+    text-transform: uppercase; color: var(--text-mid);
+    min-height: 12px; margin-top: 8px;
+  }
+  .room-panel .room-status.active { color: var(--dp-green-bright); }
+  .room-panel .room-status.error { color: var(--danger); }
+
   /* Recent peers card — quick reconnect */
   .recent-peers {
     background: linear-gradient(135deg, rgba(0,135,85,0.12), rgba(38,208,124,0.04));
@@ -703,6 +733,21 @@
         <button class="btn" id="btnGrantMic">Grant</button>
       </div>
 
+      <!-- Room-by-passcode (WebSocket relay) -->
+      <div class="room-panel">
+        <div class="room-title">Join by Passcode</div>
+        <div class="room-sub">
+          Share a passcode with your peers. Everyone who enters the same code is paired through our relay.
+          The server only sees ciphertext — your messages, keys, and SDP stay private.
+        </div>
+        <input class="code" id="roomPasscode" placeholder="e.g. sunset-otter-42" autocomplete="off" spellcheck="false" />
+        <div class="btn-row" style="margin-top:10px;">
+          <button class="btn btn-primary" id="btnJoinRoom">Join Room</button>
+          <button class="btn" id="btnLeaveRoom" disabled>Leave</button>
+        </div>
+        <div class="room-status" id="roomStatus"></div>
+      </div>
+
       <div class="role-toggle" role="tablist">
         <button id="roleHost" class="active" data-role="host">Host</button>
         <button id="roleJoiner" data-role="joiner">Joiner</button>
@@ -889,6 +934,10 @@
     btnCopyAnswer: $('btnCopyAnswer'),
     btnShareOffer:  $('btnShareOffer'),
     btnShareAnswer: $('btnShareAnswer'),
+    roomPasscode:  $('roomPasscode'),
+    btnJoinRoom:   $('btnJoinRoom'),
+    btnLeaveRoom:  $('btnLeaveRoom'),
+    roomStatus:    $('roomStatus'),
     btnReset:      $('btnReset'),
     messages:      $('messages'),
     emptyState:    $('emptyState'),
@@ -2265,6 +2314,324 @@
       els.btnGenAnswer.textContent = 'Generate Answer';
     }
   });
+
+  /* ── Room signaling (passcode + WebSocket relay) ──────────────
+     A shared passcode does double duty:
+       1. Hashed into a roomId that both peers use as a rendezvous
+          point on the relay.
+       2. Stretched into an AES-GCM key that encrypts every signal
+          payload, so the server sees only ciphertext and a
+          malicious relay cannot swap SDPs.
+     Existing WebRTC helpers (buildPC / encodeSDP / signed handshake)
+     are reused verbatim — the relay just replaces the copy/paste
+     transport. ─────────────────────────────────────────────────── */
+  const ROOM_KDF_SALT = 'cipher-p2p-chat-v1';
+  const ROOM_KDF_ITERS = 200000;
+  let roomWS = null;
+  let roomKey = null;
+  let roomIdHex = null;
+  let myRoomPeerId = null;
+  const roomPeers = new Set();
+  let roomRole = null;     // 'host' | 'joiner' once paired
+
+  const setRoomStatus = (text, cls = '') => {
+    if (!els.roomStatus) return;
+    els.roomStatus.textContent = text || '';
+    els.roomStatus.className = 'room-status' + (cls ? ' ' + cls : '');
+  };
+
+  const b64enc = (bytes) => {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  };
+  const b64dec = (b64) => {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  };
+
+  const deriveRoom = async (passcode) => {
+    const enc = new TextEncoder();
+    const idBytes = await crypto.subtle.digest(
+      'SHA-256',
+      enc.encode('cipher-room-v1|' + passcode)
+    );
+    const id = Array.from(new Uint8Array(idBytes))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+    const km = await crypto.subtle.importKey(
+      'raw', enc.encode(passcode),
+      { name: 'PBKDF2' }, false, ['deriveKey']
+    );
+    const key = await crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: enc.encode(ROOM_KDF_SALT),
+        iterations: ROOM_KDF_ITERS, hash: 'SHA-256' },
+      km,
+      { name: 'AES-GCM', length: 256 },
+      false, ['encrypt', 'decrypt']
+    );
+    return { id, key };
+  };
+
+  const roomEncrypt = async (obj) => {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const pt = new TextEncoder().encode(JSON.stringify(obj));
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, roomKey, pt);
+    const packed = new Uint8Array(iv.length + ct.byteLength);
+    packed.set(iv, 0);
+    packed.set(new Uint8Array(ct), iv.length);
+    return b64enc(packed);
+  };
+  const roomDecrypt = async (b64) => {
+    const packed = b64dec(b64);
+    const iv = packed.slice(0, 12);
+    const ct = packed.slice(12);
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, roomKey, ct);
+    return JSON.parse(new TextDecoder().decode(pt));
+  };
+
+  const roomSignal = async (to, payload) => {
+    if (!roomWS || roomWS.readyState !== 1) return;
+    const enc = await roomEncrypt(payload);
+    roomWS.send(JSON.stringify({ type: 'signal', to, payload: enc }));
+  };
+
+  const roomResetConnection = () => {
+    try { if (dc) dc.close(); } catch {}
+    try { if (pc) pc.close(); } catch {}
+    pc = null; dc = null;
+  };
+
+  const roomStartHostHandshake = async (toPeerId) => {
+    setStatus('connecting', 'Preparing offer…');
+    setRoomStatus('Peer joined — sending offer', 'active');
+    if (micPermission === 'unknown') { try { await requestMic(); } catch {} }
+
+    pc = buildPC();
+    dc = pc.createDataChannel('cipher', { ordered: true });
+    attachDataChannel(dc);
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitForIceComplete(pc);
+
+    const sdpCode = await encodeSDP(pc.localDescription);
+    const signed = await buildSignedHandshake(sdpCode);
+    await roomSignal(toPeerId, { kind: 'offer', data: signed });
+    setStatus('connecting', 'Awaiting answer…');
+    setRoomStatus('Offer sent — awaiting answer', 'active');
+  };
+
+  const handleRoomSignal = async (fromPeerId, payload) => {
+    if (!payload || typeof payload.kind !== 'string') return;
+
+    if (payload.kind === 'offer') {
+      // We're the joiner: build answer
+      roomRole = 'joiner';
+      setStatus('connecting', 'Offer received — answering…');
+      setRoomStatus('Building answer', 'active');
+      if (micPermission === 'unknown') { try { await requestMic(); } catch {} }
+
+      const { sdpCode, peerFp, peerNick } = await verifySignedHandshake(payload.data);
+      peerIdentityFp = peerFp;
+      peerSelfNickname = peerNick;
+
+      pc = buildPC();
+      const offerDesc = await decodeSDP(sdpCode);
+      await pc.setRemoteDescription(offerDesc);
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await waitForIceComplete(pc);
+
+      const ourSdpCode = await encodeSDP(pc.localDescription);
+      const signedAns = await buildSignedHandshake(ourSdpCode);
+      await roomSignal(fromPeerId, { kind: 'answer', data: signedAns });
+      setStatus('connecting', 'Answer sent — connecting…');
+      setRoomStatus('Answer sent — connecting', 'active');
+      return;
+    }
+
+    if (payload.kind === 'answer') {
+      if (!pc) return;
+      setRoomStatus('Answer received — connecting', 'active');
+      const { sdpCode, peerFp, peerNick } = await verifySignedHandshake(payload.data);
+      peerIdentityFp = peerFp;
+      peerSelfNickname = peerNick;
+      const desc = await decodeSDP(sdpCode);
+      await pc.setRemoteDescription(desc);
+      setStatus('connecting', 'Connecting…');
+      return;
+    }
+  };
+
+  const roomLeave = (reason) => {
+    if (roomWS) {
+      try { roomWS.send(JSON.stringify({ type: 'leave' })); } catch {}
+      try { roomWS.close(); } catch {}
+    }
+    roomWS = null;
+    roomKey = null;
+    roomIdHex = null;
+    myRoomPeerId = null;
+    roomPeers.clear();
+    roomRole = null;
+    if (els.btnJoinRoom) {
+      els.btnJoinRoom.disabled = false;
+      els.btnJoinRoom.textContent = 'Join Room';
+    }
+    if (els.btnLeaveRoom) els.btnLeaveRoom.disabled = true;
+    if (els.roomPasscode) els.roomPasscode.disabled = false;
+    if (reason) setRoomStatus(reason);
+  };
+
+  const roomJoin = async (passcode) => {
+    if (roomWS) roomLeave();
+    roomResetConnection();
+
+    const { id, key } = await deriveRoom(passcode);
+    roomIdHex = id;
+    roomKey = key;
+    roomPeers.clear();
+    roomRole = null;
+
+    const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    setRoomStatus('Connecting to relay…', 'active');
+    setStatus('connecting', 'Connecting to relay…');
+
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      let ws;
+      try { ws = new WebSocket(wsUrl); }
+      catch (e) { return reject(e); }
+      roomWS = ws;
+
+      const onFail = (err) => {
+        if (settled) return; settled = true;
+        reject(err || new Error('relay connection failed'));
+      };
+
+      ws.onopen = () => {
+        if (settled) return; settled = true;
+        ws.send(JSON.stringify({ type: 'join', room: roomIdHex }));
+        resolve();
+      };
+      ws.onerror = () => onFail(new Error('relay error'));
+      ws.onclose = () => {
+        if (ws === roomWS) {
+          setRoomStatus('Disconnected from relay');
+          if (els.btnJoinRoom) {
+            els.btnJoinRoom.disabled = false;
+            els.btnJoinRoom.textContent = 'Join Room';
+          }
+          if (els.btnLeaveRoom) els.btnLeaveRoom.disabled = true;
+          if (els.roomPasscode) els.roomPasscode.disabled = false;
+          roomWS = null;
+        }
+        onFail(new Error('connection closed'));
+      };
+
+      ws.onmessage = async (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        if (!msg || typeof msg.type !== 'string') return;
+
+        if (msg.type === 'joined') {
+          myRoomPeerId = msg.peerId;
+          const existing = Array.isArray(msg.peers) ? msg.peers : [];
+          for (const p of existing) roomPeers.add(p);
+          if (existing.length === 0) {
+            setRoomStatus('Room ready — waiting for peer', 'active');
+            setStatus('connecting', 'Waiting for peer…');
+            toast('Room ready — share the passcode with your peer');
+          } else if (existing.length === 1) {
+            // Someone else was already here; they will initiate as host.
+            roomRole = 'joiner';
+            setRoomStatus('Peer found — awaiting offer', 'active');
+            setStatus('connecting', 'Peer found — awaiting offer…');
+          } else {
+            // Pair is already formed; this client can't join.
+            toast('Room is full (2 people max for now)', true);
+            setRoomStatus('Room full — try another passcode', 'error');
+            roomLeave();
+          }
+        } else if (msg.type === 'peer-joined') {
+          if (typeof msg.peerId !== 'string') return;
+          roomPeers.add(msg.peerId);
+          // If we were alone we are host for this pairing.
+          if (!roomRole && !pc) {
+            roomRole = 'host';
+            try {
+              await roomStartHostHandshake(msg.peerId);
+            } catch (e) {
+              console.error(e);
+              toast('Handshake failed', true);
+              setRoomStatus('Handshake failed', 'error');
+            }
+          }
+        } else if (msg.type === 'peer-left') {
+          roomPeers.delete(msg.peerId);
+          if (roomPeers.size === 0) {
+            setRoomStatus('Peer left — waiting…', '');
+          }
+        } else if (msg.type === 'signal') {
+          if (typeof msg.from !== 'string' || typeof msg.payload !== 'string') return;
+          try {
+            const payload = await roomDecrypt(msg.payload);
+            await handleRoomSignal(msg.from, payload);
+          } catch (e) {
+            console.error('signal decrypt/handle failed', e);
+            toast('Signal failed — wrong passcode?', true);
+            setRoomStatus('Signal rejected — wrong passcode?', 'error');
+          }
+        } else if (msg.type === 'error') {
+          toast('Relay: ' + msg.error, true);
+          setRoomStatus('Relay: ' + msg.error, 'error');
+        }
+      };
+    });
+  };
+
+  if (els.btnJoinRoom) {
+    els.btnJoinRoom.addEventListener('click', async () => {
+      const code = (els.roomPasscode.value || '').trim();
+      if (code.length < 6) {
+        toast('Passcode must be at least 6 characters', true);
+        setRoomStatus('Passcode too short', 'error');
+        return;
+      }
+      els.btnJoinRoom.disabled = true;
+      els.btnJoinRoom.textContent = 'Connecting…';
+      els.roomPasscode.disabled = true;
+      try {
+        await roomJoin(code);
+        els.btnJoinRoom.textContent = 'In Room';
+        els.btnLeaveRoom.disabled = false;
+      } catch (e) {
+        console.error(e);
+        toast('Could not join room', true);
+        setRoomStatus('Could not reach relay', 'error');
+        els.btnJoinRoom.disabled = false;
+        els.btnJoinRoom.textContent = 'Join Room';
+        els.roomPasscode.disabled = false;
+      }
+    });
+  }
+  if (els.btnLeaveRoom) {
+    els.btnLeaveRoom.addEventListener('click', () => {
+      roomLeave('Left room');
+      toast('Left room');
+    });
+  }
+  if (els.roomPasscode) {
+    els.roomPasscode.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && !els.btnJoinRoom.disabled) {
+        ev.preventDefault();
+        els.btnJoinRoom.click();
+      }
+    });
+  }
 
   /* ── Copy ─────────────────────────────────────────────────── */
   const copy = async (text, label) => {

@@ -1,0 +1,16 @@
+{
+  "name": "cipher-p2p-chat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "End-to-end encrypted P2P chat with WebSocket signaling relay",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
