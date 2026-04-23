@@ -2684,12 +2684,22 @@
     }
   };
 
+  const meshSetReceivingAudio = (on) => {
+    for (const [, e] of meshPeers) {
+      if (e.audioEl) {
+        e.audioEl.muted = !on;
+        if (on) { try { e.audioEl.play().catch(()=>{}); } catch {} }
+      }
+    }
+  };
+
   const meshCallEnter = (sendInvite = true) => {
     if (!micStream) { toast('Grant microphone access first', true); return; }
     if (inCall) return;
     inCall = true;
     isMuted = false;
     micStream.getAudioTracks().forEach(t => t.enabled = true);
+    meshSetReceivingAudio(true);
     if (audioContext && audioContext.state === 'suspended') audioContext.resume().catch(()=>{});
     if (sendInvite) {
       meshBroadcastString(JSON.stringify({ k: 'call-invite' }));
@@ -2706,6 +2716,7 @@
     inCall = false;
     isMuted = false;
     if (micStream) micStream.getAudioTracks().forEach(t => t.enabled = false);
+    meshSetReceivingAudio(false);
     meshBroadcastString(JSON.stringify({ k: 'call-end' }));
     stopLevelMeter();
     addCallEvent('You left the call', true);
@@ -2719,9 +2730,15 @@
   const meshOnCallInvite = (entry) => {
     if (inCall) return; // already on air — nothing to do
     pendingCallInviter = entry;
+    const inviter = meshPeerDisplayName(entry);
     const sub = els.callBanner.querySelector('.text small');
-    if (sub) sub.textContent = `${meshPeerDisplayName(entry)} is inviting you to voice`;
+    if (sub) sub.textContent = `${inviter} is inviting you to voice`;
     els.callBanner.classList.add('show');
+    // Extra visibility so the invite is never missed: toast, tab alert,
+    // and auto-switch the mobile view to Chat where the banner is visible.
+    toast(`${inviter} is calling — Accept or Decline above`);
+    if (els.btnSettings) els.btnSettings.classList.add('has-alert');
+    setMobileView('chat');
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const o = ctx.createOscillator(); const g = ctx.createGain();
@@ -2781,7 +2798,9 @@
     }
 
     // Remote audio: one hidden <audio> element per peer so every remote
-    // voice plays through the browser's mixer simultaneously.
+    // voice plays through the browser's mixer simultaneously. Start muted
+    // so the track flows but no sound reaches the user until they accept
+    // the call — decline stays silent.
     conn.ontrack = (ev) => {
       const [stream] = ev.streams;
       if (!stream) return;
@@ -2794,6 +2813,7 @@
         entry.audioEl = el;
       }
       entry.audioEl.srcObject = stream;
+      entry.audioEl.muted = !inCall;
     };
 
     return conn;
@@ -2811,6 +2831,10 @@
       addSystem(`${meshPeerDisplayName(entry)} joined`);
       updateMeshStatus();
       updateNicknameLockUI();
+      // If we're already on call, invite the newcomer so they get the prompt.
+      if (inCall) {
+        try { channel.send(JSON.stringify({ k: 'call-invite' })); } catch {}
+      }
     };
     channel.onclose = () => {
       if (meshConnectedCount() === 0 && !dc) disableComposer();
