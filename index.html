@@ -178,6 +178,40 @@
   }
   .call-banner .text small { color: var(--text-mid); font-size: 9px; display: block; margin-top: 2px; }
 
+  /* ─────────── MEMBER BAR (shows who's in the room) ─────────── */
+  .member-bar {
+    display: none; flex-wrap: nowrap; gap: 8px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line);
+    background: var(--bg-1); overflow-x: auto; white-space: nowrap;
+  }
+  .member-bar.show { display: flex; }
+  .member-bar::-webkit-scrollbar { height: 4px; }
+  .member-bar::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 2px; }
+  .member-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px 4px 4px; border: 1px solid var(--line);
+    border-radius: 999px; font-family: var(--mono); font-size: 11px;
+    color: var(--text-mid); white-space: nowrap; flex-shrink: 0;
+  }
+  .member-chip.online { color: var(--text); border-color: var(--line-2); }
+  .member-chip.in-call {
+    border-color: var(--dp-green-bright);
+    background: rgba(38,208,124,0.08);
+    color: var(--text);
+  }
+  .member-chip.self { background: rgba(38,208,124,0.04); }
+  .member-chip .avatar {
+    width: 20px; height: 20px; border-radius: 50%; background: var(--dp-green-dark);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 600; color: white;
+  }
+  .member-chip.in-call .avatar { background: var(--dp-green-bright); }
+  .member-chip .mic-icon {
+    width: 11px; height: 11px; color: var(--dp-green-bright);
+    margin-left: 2px;
+  }
+  .member-chip.muted .mic-icon { color: var(--text-dim); opacity: 0.5; }
+
   /* ─────────── MAIN LAYOUT ─────────── */
   main {
     display: grid; grid-template-columns: 380px 1fr;
@@ -472,7 +506,7 @@
 
   /* ─────────── CHAT PANEL ─────────── */
   .chat {
-    display: grid; grid-template-rows: 1fr auto;
+    display: grid; grid-template-rows: auto 1fr auto;
     height: 100%; overflow: hidden; background: var(--bg-0);
   }
   .messages {
@@ -912,6 +946,7 @@
 
     <!-- CHAT PANEL -->
     <section class="chat">
+      <div class="member-bar" id="memberBar"></div>
       <div class="messages" id="messages">
         <div class="empty-state" id="emptyState">
           <div class="glyph">∞</div>
@@ -1038,6 +1073,7 @@
     roomStatus:    $('roomStatus'),
     btnReset:      $('btnReset'),
     messages:      $('messages'),
+    memberBar:     $('memberBar'),
     emptyState:    $('emptyState'),
     textInput:     $('textInput'),
     btnSend:       $('btnSend'),
@@ -1178,9 +1214,11 @@
      ════════════════════════════════════════════════════════════════════ */
 
   const DB_NAME = 'cipher-id';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
   const STORE_ID = 'identity';
   const STORE_PEERS = 'peers';
+  const STORE_MESSAGES = 'messages';
+  const MESSAGES_PER_ROOM_CAP = 500;
 
   const openDB = () => new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -1188,10 +1226,90 @@
       const db = e.target.result;
       if (!db.objectStoreNames.contains(STORE_ID))    db.createObjectStore(STORE_ID);
       if (!db.objectStoreNames.contains(STORE_PEERS)) db.createObjectStore(STORE_PEERS);
+      if (!db.objectStoreNames.contains(STORE_MESSAGES)) {
+        const s = db.createObjectStore(STORE_MESSAGES, { keyPath: 'id', autoIncrement: true });
+        s.createIndex('roomId', 'roomId', { unique: false });
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror   = () => reject(req.error);
   });
+
+  const idbAppendMessage = async (record) => {
+    if (!record.roomId) return;
+    try {
+      const db = await openDB();
+      await new Promise((res, rej) => {
+        const tx = db.transaction(STORE_MESSAGES, 'readwrite');
+        const r = tx.objectStore(STORE_MESSAGES).add(record);
+        r.onsuccess = () => res();
+        r.onerror   = () => rej(r.error);
+      });
+    } catch (err) { console.warn('message save failed', err); }
+  };
+
+  const idbGetRoomMessages = async (roomId, limit = 500) => {
+    try {
+      const db = await openDB();
+      return await new Promise((res, rej) => {
+        const out = [];
+        const tx = db.transaction(STORE_MESSAGES, 'readonly');
+        const idx = tx.objectStore(STORE_MESSAGES).index('roomId');
+        const range = IDBKeyRange.only(roomId);
+        const cursor = idx.openCursor(range);
+        cursor.onsuccess = (e) => {
+          const c = e.target.result;
+          if (c) { out.push(c.value); c.continue(); }
+          else res(out.slice(-limit));
+        };
+        cursor.onerror = () => rej(cursor.error);
+      });
+    } catch (err) { console.warn('message load failed', err); return []; }
+  };
+
+  const idbPruneRoomMessages = async (roomId, keep = MESSAGES_PER_ROOM_CAP) => {
+    try {
+      const db = await openDB();
+      const all = await new Promise((res, rej) => {
+        const out = [];
+        const tx = db.transaction(STORE_MESSAGES, 'readonly');
+        const idx = tx.objectStore(STORE_MESSAGES).index('roomId');
+        const cursor = idx.openCursor(IDBKeyRange.only(roomId));
+        cursor.onsuccess = (e) => {
+          const c = e.target.result;
+          if (c) { out.push(c.value.id); c.continue(); }
+          else res(out);
+        };
+        cursor.onerror = () => rej(cursor.error);
+      });
+      if (all.length <= keep) return;
+      const toDelete = all.slice(0, all.length - keep);
+      await new Promise((res, rej) => {
+        const tx = db.transaction(STORE_MESSAGES, 'readwrite');
+        const s = tx.objectStore(STORE_MESSAGES);
+        for (const id of toDelete) s.delete(id);
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+      });
+    } catch (err) { console.warn('message prune failed', err); }
+  };
+
+  const idbClearRoomMessages = async (roomId) => {
+    try {
+      const db = await openDB();
+      await new Promise((res, rej) => {
+        const tx = db.transaction(STORE_MESSAGES, 'readwrite');
+        const idx = tx.objectStore(STORE_MESSAGES).index('roomId');
+        const cursor = idx.openCursor(IDBKeyRange.only(roomId));
+        cursor.onsuccess = (e) => {
+          const c = e.target.result;
+          if (c) { c.delete(); c.continue(); }
+          else res();
+        };
+        cursor.onerror = () => rej(cursor.error);
+      });
+    } catch (err) { console.warn('message clear failed', err); }
+  };
 
   const idbGet = async (store, key) => {
     const db = await openDB();
@@ -1895,7 +2013,9 @@
         addSystem(trusted
           ? `Connected to ${name} · trusted peer`
           : `Connected to ${name} · identity not yet verified`);
+        loadAndRenderHistory('peer_' + peerIdentityFp);
       }
+      renderMemberBar();
     };
 
     dc.onclose = () => {
@@ -1948,6 +2068,12 @@
   };
 
   /* ── Message rendering ────────────────────────────────────── */
+  const currentConversationId = () => {
+    if (roomIdHex) return 'room_' + roomIdHex;
+    if (peerIdentityFp) return 'peer_' + peerIdentityFp;
+    return null;
+  };
+
   const addMessage = (kind, text, senderOverride) => {
     els.emptyState?.remove();
     const div = document.createElement('div');
@@ -1956,17 +2082,48 @@
     if (senderOverride) sender = senderOverride;
     else if (kind === 'outgoing') sender = myNickname || 'You';
     else sender = peerDisplayName() || 'Peer';
+    const ts = Date.now();
     div.innerHTML =
       `<span class="msg-sender">${escapeHtml(sender)}</span>` +
       `<div>${escapeHtml(text)}</div>` +
-      `<div class="msg-meta">${fmtTime(new Date())}</div>`;
+      `<div class="msg-meta">${fmtTime(new Date(ts))}</div>`;
     els.messages.appendChild(div);
     els.messages.scrollTop = els.messages.scrollHeight;
+    // Persist (fire-and-forget); prune occasionally.
+    const cid = currentConversationId();
+    if (cid) {
+      idbAppendMessage({ roomId: cid, kind, text, sender, ts });
+      if (Math.random() < 0.02) idbPruneRoomMessages(cid);
+    }
     // Mobile: flag the settings button if user is in Setup drawer when
     // an incoming message arrives (so they notice there's new chat)
     if (kind === 'incoming' && els.mainView && els.mainView.dataset.view === 'setup') {
       els.btnSettings?.classList.add('has-alert');
     }
+  };
+
+  let historyLoadedFor = null; // conversation id we've already rendered
+  const loadAndRenderHistory = async (cid) => {
+    if (!cid || historyLoadedFor === cid) return;
+    historyLoadedFor = cid;
+    const msgs = await idbGetRoomMessages(cid, MESSAGES_PER_ROOM_CAP);
+    if (!msgs.length) return;
+    els.emptyState?.remove();
+    // Sort by id (insertion order) to be safe; IDB cursor already iterates key order.
+    for (const m of msgs) {
+      const div = document.createElement('div');
+      div.className = `msg ${m.kind}`;
+      div.innerHTML =
+        `<span class="msg-sender">${escapeHtml(m.sender || 'Peer')}</span>` +
+        `<div>${escapeHtml(m.text || '')}</div>` +
+        `<div class="msg-meta">${fmtTime(new Date(m.ts || Date.now()))}</div>`;
+      els.messages.appendChild(div);
+    }
+    const divider = document.createElement('div');
+    divider.className = 'msg system';
+    divider.textContent = `— ${msgs.length} message${msgs.length > 1 ? 's' : ''} restored from this room —`;
+    els.messages.appendChild(divider);
+    els.messages.scrollTop = els.messages.scrollHeight;
   };
 
   const addSystem = (text) => {
@@ -2284,6 +2441,7 @@
     isMuted = !isMuted;
     micStream.getAudioTracks().forEach(t => t.enabled = !isMuted);
     updateCallUI();
+    renderMemberBar();
     toast(isMuted ? 'Muted' : 'Unmuted');
   };
 
@@ -2643,12 +2801,77 @@
   };
   const updateMeshStatus = () => {
     const n = meshConnectedCount();
-    if (meshPeers.size === 0) return;
+    if (meshPeers.size === 0) { renderMemberBar(); return; }
     if (n === 0)      setStatus('connecting', 'Connecting to peers…');
     else if (n === 1) setStatus('connected',  'Channel secure · 1 peer');
     else              setStatus('connected', `Channel secure · ${n} peers`);
     updateMeshHeaderPill();
     updateCallUI();
+    renderMemberBar();
+  };
+
+  const MIC_ICON = '<svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>';
+
+  const makeMemberChip = ({ avatar, name, online, inCall: isInCall, muted, self }) => {
+    const el = document.createElement('span');
+    el.className = 'member-chip';
+    if (online) el.classList.add('online');
+    if (isInCall) el.classList.add('in-call');
+    if (muted) el.classList.add('muted');
+    if (self) el.classList.add('self');
+    const labelName = self ? `You${name && name !== 'You' ? ` · ${name}` : ''}` : name;
+    el.innerHTML =
+      `<span class="avatar">${escapeHtml((avatar || '?').toString())}</span>` +
+      `<span class="name">${escapeHtml(labelName)}</span>` +
+      (isInCall ? MIC_ICON : '');
+    return el;
+  };
+
+  const renderMemberBar = () => {
+    const bar = els.memberBar;
+    if (!bar) return;
+    const legacyConnected = dc && dc.readyState === 'open';
+    const meshConnected = meshConnectedCount() > 0;
+    if (!legacyConnected && !meshConnected) {
+      bar.classList.remove('show');
+      bar.innerHTML = '';
+      return;
+    }
+    bar.classList.add('show');
+    bar.innerHTML = '';
+
+    const selfName = myNickname || 'You';
+    bar.appendChild(makeMemberChip({
+      avatar: (selfName[0] || 'Y').toUpperCase(),
+      name: selfName,
+      online: true,
+      inCall: !!inCall,
+      muted: !!isMuted,
+      self: true,
+    }));
+
+    if (meshConnected) {
+      for (const [, e] of meshPeers) {
+        if (!e.dc || e.dc.readyState !== 'open') continue;
+        const name = meshPeerDisplayName(e);
+        bar.appendChild(makeMemberChip({
+          avatar: (name[0] || '?').toUpperCase(),
+          name,
+          online: true,
+          inCall: !!e.inCall,
+          muted: false,
+        }));
+      }
+    } else if (legacyConnected && peerIdentityFp) {
+      const name = peerDisplayName() || 'Peer';
+      bar.appendChild(makeMemberChip({
+        avatar: peerInitial() || (name[0] || '?').toUpperCase(),
+        name,
+        online: true,
+        inCall: !!inCall,
+        muted: false,
+      }));
+    }
   };
 
   const meshAddEntry = (peerId, outgoing) => {
@@ -2678,6 +2901,7 @@
       // If we were in a mesh call and everyone left, drop out of call state.
       if (inCall && !dc) meshCallExit();
     }
+    if (meshPeers.size === 0) stopMeshHeartbeat();
     updateMeshStatus();
     if (meshPeers.size === 0 && !pc) {
       els.peerPill.classList.remove('connected', 'trusted');
@@ -2709,6 +2933,7 @@
       addCallEvent('Joined voice call');
     }
     updateCallUI();
+    renderMemberBar();
     startLevelMeter();
   };
   const meshCallExit = () => {
@@ -2721,6 +2946,7 @@
     stopLevelMeter();
     addCallEvent('You left the call', true);
     updateCallUI();
+    renderMemberBar();
   };
 
   // Incoming invite banner state: who invited us (so Accept can send back
@@ -2728,7 +2954,9 @@
   let pendingCallInviter = null;
 
   const meshOnCallInvite = (entry) => {
-    if (inCall) return; // already on air — nothing to do
+    entry.inCall = true; // inviter is on air
+    renderMemberBar();
+    if (inCall) return; // already on air — no banner needed
     pendingCallInviter = entry;
     const inviter = meshPeerDisplayName(entry);
     const sub = els.callBanner.querySelector('.text small');
@@ -2748,13 +2976,17 @@
     } catch {}
   };
   const meshOnCallAccept = (entry) => {
+    entry.inCall = true;
     addCallEvent(`${meshPeerDisplayName(entry)} joined the call`);
+    renderMemberBar();
   };
   const meshOnCallDecline = (entry) => {
     addCallEvent(`${meshPeerDisplayName(entry)} declined`, true);
   };
   const meshOnCallEnd = (entry) => {
+    entry.inCall = false;
     addCallEvent(`${meshPeerDisplayName(entry)} left the call`);
+    renderMemberBar();
   };
   const meshClearAll = () => {
     for (const peerId of Array.from(meshPeers.keys())) meshRemoveEntry(peerId);
@@ -2771,9 +3003,28 @@
     conn.onconnectionstatechange = () => {
       const s = conn.connectionState;
       if (s === 'connected') {
+        entry.lastHeardFrom = Date.now();
+        entry.restartAttempts = 0;
         updateMeshStatus();
         updateNicknameLockUI();
-      } else if (s === 'disconnected' || s === 'failed' || s === 'closed') {
+      } else if (s === 'disconnected') {
+        // Transient — WebRTC may recover on its own. Nudge with an ICE
+        // restart if we're the initiator; wait a bit before giving up.
+        if (entry.outgoing && entry.remoteDescSet) {
+          entry.restartAttempts = (entry.restartAttempts || 0) + 1;
+          if (entry.restartAttempts <= 2) {
+            meshIceRestart(entry).catch(e => console.warn('iceRestart failed', e));
+          }
+        }
+        setTimeout(() => {
+          if (!meshPeers.has(entry.peerId)) return;
+          if (entry.pc && entry.pc.connectionState === 'disconnected') {
+            addSystem(`${meshPeerDisplayName(entry)} unreachable — dropping`);
+            meshRemoveEntry(entry.peerId);
+            updateNicknameLockUI();
+          }
+        }, 15000);
+      } else if (s === 'failed' || s === 'closed') {
         if (meshPeers.has(entry.peerId)) {
           addSystem(`${meshPeerDisplayName(entry)} disconnected`);
           meshRemoveEntry(entry.peerId);
@@ -2829,6 +3080,9 @@
       enableComposer();
       setMobileView('chat');
       addSystem(`${meshPeerDisplayName(entry)} joined`);
+      entry.lastHeardFrom = Date.now();
+      entry.restartAttempts = 0;
+      startMeshHeartbeat();
       updateMeshStatus();
       updateNicknameLockUI();
       // If we're already on call, invite the newcomer so they get the prompt.
@@ -2850,6 +3104,44 @@
       try { await entry.pc.addIceCandidate(c); }
       catch (e) { console.warn('addIceCandidate failed', e); }
     }
+  };
+
+  // Initiator side: redo the offer with iceRestart so the peer pair
+  // re-gathers candidates and finds a new path.
+  const meshIceRestart = async (entry) => {
+    if (!entry.pc || !entry.outgoing) return;
+    try {
+      const offer = await entry.pc.createOffer({ iceRestart: true });
+      await entry.pc.setLocalDescription(offer);
+      const sdpCode = await encodeSDP(entry.pc.localDescription);
+      const signed = await buildSignedHandshake(sdpCode);
+      await roomSignal(entry.peerId, { kind: 'offer', data: signed });
+      addSystem(`Reconnecting to ${meshPeerDisplayName(entry)}…`);
+    } catch (e) { console.warn('meshIceRestart failed', e); }
+  };
+
+  // Heartbeat across the mesh: send {k:'ping'} every 10s on each open
+  // data channel. meshHandleIncoming stamps entry.lastHeardFrom on any
+  // message. If we haven't heard in ~25s, trigger ICE restart.
+  let meshHeartbeatTimer = null;
+  const startMeshHeartbeat = () => {
+    if (meshHeartbeatTimer) return;
+    meshHeartbeatTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [, e] of meshPeers) {
+        if (!e.dc || e.dc.readyState !== 'open') continue;
+        try { e.dc.send(JSON.stringify({ k: 'ping', ts: now })); } catch {}
+        if (e.lastHeardFrom && now - e.lastHeardFrom > 25000) {
+          if (e.outgoing && (e.restartAttempts || 0) < 2) {
+            e.restartAttempts = (e.restartAttempts || 0) + 1;
+            meshIceRestart(e).catch(err => console.warn('heartbeat restart failed', err));
+          }
+        }
+      }
+    }, 10000);
+  };
+  const stopMeshHeartbeat = () => {
+    if (meshHeartbeatTimer) { clearInterval(meshHeartbeatTimer); meshHeartbeatTimer = null; }
   };
 
   const meshInitiate = async (peerId) => {
@@ -2905,6 +3197,8 @@
 
   const meshHandleIncoming = (entry, data) => {
     lastPeerActivity = Date.now();
+    entry.lastHeardFrom = Date.now();
+    entry.restartAttempts = 0;
     const displayName = meshPeerDisplayName(entry);
     if (typeof data === 'string') {
       let msg;
@@ -3009,6 +3303,8 @@
     const { id, key } = await deriveRoom(passcode);
     roomIdHex = id;
     roomKey = key;
+    historyLoadedFor = null;
+    loadAndRenderHistory('room_' + roomIdHex);
 
     const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
     setRoomStatus('Connecting to relay…', 'active');
