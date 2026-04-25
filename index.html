@@ -2193,9 +2193,14 @@
   /* ── File transfer ────────────────────────────────────────── */
   const CHUNK_SIZE = 16 * 1024;
   const sendFileMesh = async (file) => {
-    if (meshConnectedCount() === 0) return;
+    if (meshConnectedCount() === 0) {
+      toast('No peer connected — cannot send file', true);
+      return;
+    }
     const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
-    meshBroadcastString(JSON.stringify({ k: 'file-meta', id, name: file.name, size: file.size, type: file.type }));
+    const meta = JSON.stringify({ k: 'file-meta', id, name: file.name, size: file.size, type: file.type });
+    const sent = meshBroadcastString(meta);
+    if (sent === 0) { toast('No open channels — file send aborted', true); return; }
     const msgEl = addFileMessage('outgoing', file.name, file.size, id);
     const idBytes = new TextEncoder().encode(id);
     const headerLen = 1 + idBytes.length;
@@ -2216,7 +2221,10 @@
 
   const sendFile = async (file) => {
     if (meshInAnyRoom()) return sendFileMesh(file);
-    if (!dc || dc.readyState !== 'open') return;
+    if (!dc || dc.readyState !== 'open') {
+      toast('Channel not open — cannot send file', true);
+      return;
+    }
     const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
     dc.send(JSON.stringify({ k: 'file-meta', id, name: file.name, size: file.size, type: file.type }));
     const msgEl = addFileMessage('outgoing', file.name, file.size, id);
