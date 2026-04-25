@@ -510,8 +510,9 @@
     height: 100%; overflow: hidden; background: var(--bg-0);
   }
   .messages {
-    overflow-y: auto; padding: 28px 36px;
+    overflow-y: auto; overflow-x: hidden; padding: 28px 36px;
     display: flex; flex-direction: column; gap: 14px;
+    min-width: 0;
   }
   .messages::-webkit-scrollbar { width: 6px; }
   .messages::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 4px; }
@@ -540,7 +541,12 @@
 
   .msg {
     max-width: 70%; padding: 10px 14px; border-radius: 4px;
-    font-size: 14px; line-height: 1.5; word-wrap: break-word;
+    font-size: 14px; line-height: 1.5;
+    /* `overflow-wrap: anywhere` makes long unbreakable strings
+       (URLs, room ids, fingerprints) wrap mid-token instead of
+       blowing the bubble past the container's right edge. The
+       legacy `word-wrap: break-word` only breaks at spaces. */
+    overflow-wrap: anywhere; word-break: break-word; min-width: 0;
     animation: msgIn 0.25s ease-out; position: relative;
   }
   @keyframes msgIn {
@@ -611,6 +617,7 @@
     color: var(--text-mid); padding: 8px 14px; display: inline-flex;
     align-items: center; gap: 10px; font-family: var(--mono);
     font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
+    max-width: 90%; overflow-wrap: anywhere;
   }
   .msg.call svg { width: 12px; height: 12px; color: var(--dp-green-bright); }
   .msg.call.ended svg { color: var(--text-dim); }
@@ -709,6 +716,10 @@
     .recent-peers { padding: 12px; }
 
     .messages { padding: 14px 16px; gap: 10px; }
+    /* On phones the 70% cap leaves bubbles awkwardly narrow; let
+       them use most of the row so long-form chat is readable. */
+    .msg { max-width: 85%; }
+    .msg.system, .msg.call { max-width: 92%; }
     .composer { padding: 12px 14px; gap: 8px; }
     .composer input[type="text"] { padding: 10px 12px; font-size: 14px; }
 
