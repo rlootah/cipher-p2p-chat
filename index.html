@@ -713,11 +713,19 @@
     .composer input[type="text"] { padding: 10px 12px; font-size: 14px; }
 
     header { padding: 10px 14px; gap: 8px; }
+    .header-right { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
     .brand-name { font-size: 18px; }
     .brand-sub { font-size: 9px; }
     .brand-mark { width: 32px; height: 32px; }
     .status, .call-pill { padding: 5px 9px; font-size: 9px; }
     .peer-pill { padding: 4px 8px; font-size: 10px; }
+    /* When connected, the peer-pill already shows the room state, so the
+       status pill ("Channel secure · N peers") is redundant on mobile. */
+    .peer-pill.connected ~ .status { display: none; }
+    /* Drop the "On Air" / "Idle" / "Muted" label — the level meter and the
+       button colors already convey state, and we need the width back. */
+    .call-pill #callLabel { display: none; }
+    .call-pill { padding-left: 8px; gap: 8px; }
 
     textarea.code { font-size: 11px; min-height: 80px; }
     .step { margin-bottom: 18px; }
