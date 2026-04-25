@@ -3125,11 +3125,23 @@
       try { entry.audioEl.srcObject = null; entry.audioEl.remove(); } catch {}
       entry.audioEl = null;
     }
+    // If their invite banner was showing, drop it — they're gone.
+    if (pendingCallInviter && pendingCallInviter.peerId === peerId) {
+      els.callBanner.classList.remove('show');
+      pendingCallInviter = null;
+    }
     meshPeers.delete(peerId);
     if (meshConnectedCount() === 0 && !dc) {
       disableComposer();
       // If we were in a mesh call and everyone left, drop out of call state.
       if (inCall && !dc) meshCallExit();
+    }
+    // Even if other peers remain, if none of them are still on call we
+    // should auto-exit so we don't invite new joiners into a dead call.
+    if (inCall && !dc) {
+      let anyOnCall = false;
+      for (const [, e] of meshPeers) if (e.inCall) { anyOnCall = true; break; }
+      if (!anyOnCall) meshCallExit();
     }
     if (meshPeers.size === 0) stopMeshHeartbeat();
     updateMeshStatus();
@@ -3217,6 +3229,21 @@
     entry.inCall = false;
     addCallEvent(`${meshPeerDisplayName(entry)} left the call`);
     renderMemberBar();
+    // If they were the one whose invite banner is showing, dismiss it
+    // — the call they invited us to no longer exists.
+    if (pendingCallInviter && pendingCallInviter.peerId === entry.peerId) {
+      els.callBanner.classList.remove('show');
+      pendingCallInviter = null;
+    }
+    // If we're still flagged as on-call but nobody else is, the call
+    // has effectively ended. Drop out so we don't invite future
+    // joiners (meshAttachDC.onopen sends a call-invite when inCall
+    // is true) into a call that no peer is actually on.
+    if (inCall) {
+      let anyOnCall = false;
+      for (const [, e] of meshPeers) if (e.inCall) { anyOnCall = true; break; }
+      if (!anyOnCall) meshCallExit();
+    }
   };
   const meshClearAll = () => {
     for (const peerId of Array.from(meshPeers.keys())) meshRemoveEntry(peerId);
