@@ -2105,7 +2105,10 @@
   let historyLoadedFor = null; // conversation id we've already rendered
   const loadAndRenderHistory = async (cid) => {
     if (!cid || historyLoadedFor === cid) return;
+    // Switching conversations — wipe whatever's on screen so we don't
+    // mix history from two rooms / peers.
     historyLoadedFor = cid;
+    els.messages.innerHTML = '';
     const msgs = await idbGetRoomMessages(cid, MESSAGES_PER_ROOM_CAP);
     if (!msgs.length) return;
     els.emptyState?.remove();
@@ -2748,6 +2751,11 @@
     try { if (dc) dc.close(); } catch {}
     try { if (pc) pc.close(); } catch {}
     pc = null; dc = null;
+    // Stale identity from a prior manual handshake — clear so the
+    // conversation id (currentConversationId) flips cleanly to the
+    // room and history loads correctly.
+    peerIdentityFp = null;
+    peerSelfNickname = null;
     meshClearAll();
   };
 
@@ -3158,33 +3166,54 @@
   };
 
   const meshAcceptOffer = async (peerId, signedOffer) => {
+    const wasNew = !meshPeers.has(peerId);
     const entry = meshAddEntry(peerId, false);
     if (!entry.pc) entry.pc = meshBuildPC(entry);
-    const { sdpCode, peerFp, peerNick } = await verifySignedHandshake(signedOffer);
-    entry.identityFp = peerFp;
-    if (peerNick) entry.nickname = peerNick;
-    const offerDesc = await decodeSDP(sdpCode);
-    await entry.pc.setRemoteDescription(offerDesc);
-    entry.remoteDescSet = true;
-    await meshFlushCandidates(entry);
+    try {
+      const { sdpCode, peerFp, peerNick } = await verifySignedHandshake(signedOffer);
+      entry.identityFp = peerFp;
+      if (peerNick) entry.nickname = peerNick;
+      const offerDesc = await decodeSDP(sdpCode);
+      // setRemoteDescription can throw InvalidStateError if a re-offer
+      // arrives while signaling state isn't stable (e.g. our own offer
+      // is still in flight after a glare). The try/catch lets us roll
+      // back instead of leaving a partially-built peer.
+      await entry.pc.setRemoteDescription(offerDesc);
+      entry.remoteDescSet = true;
+      await meshFlushCandidates(entry);
 
-    const answer = await entry.pc.createAnswer();
-    await entry.pc.setLocalDescription(answer);
-    const ourSdpCode = await encodeSDP(entry.pc.localDescription);
-    const signedAns = await buildSignedHandshake(ourSdpCode);
-    await roomSignal(peerId, { kind: 'answer', data: signedAns });
+      const answer = await entry.pc.createAnswer();
+      await entry.pc.setLocalDescription(answer);
+      const ourSdpCode = await encodeSDP(entry.pc.localDescription);
+      const signedAns = await buildSignedHandshake(ourSdpCode);
+      await roomSignal(peerId, { kind: 'answer', data: signedAns });
+    } catch (err) {
+      console.warn('meshAcceptOffer failed for', peerId, err);
+      // Brand-new entry that never got a remote description / data
+      // channel: drop it cleanly so the peer can retry.
+      if (wasNew && !entry.remoteDescSet && !entry.dc) {
+        meshRemoveEntry(peerId);
+      }
+      throw err;
+    }
   };
 
   const meshHandleAnswer = async (peerId, signedAnswer) => {
     const entry = meshPeers.get(peerId);
     if (!entry || !entry.pc) return;
-    const { sdpCode, peerFp, peerNick } = await verifySignedHandshake(signedAnswer);
-    entry.identityFp = peerFp;
-    if (peerNick) entry.nickname = peerNick;
-    const desc = await decodeSDP(sdpCode);
-    await entry.pc.setRemoteDescription(desc);
-    entry.remoteDescSet = true;
-    await meshFlushCandidates(entry);
+    try {
+      const { sdpCode, peerFp, peerNick } = await verifySignedHandshake(signedAnswer);
+      entry.identityFp = peerFp;
+      if (peerNick) entry.nickname = peerNick;
+      const desc = await decodeSDP(sdpCode);
+      await entry.pc.setRemoteDescription(desc);
+      entry.remoteDescSet = true;
+      await meshFlushCandidates(entry);
+    } catch (err) {
+      console.warn('meshHandleAnswer failed for', peerId, err);
+      // Don't yank the peer here — an in-flight ICE restart may settle
+      // on the next round; just log and let the heartbeat retry.
+    }
   };
 
   const meshHandleCandidate = async (peerId, cand) => {

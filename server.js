@@ -91,7 +91,11 @@ wss.on('connection', (ws, req) => {
 
     if (msg.type === 'join') {
       if (ws.room) return;
-      if (typeof msg.room !== 'string' || msg.room.length < 16 || msg.room.length > 128) {
+      // Room id is the SHA-256 hex of the passcode (64 chars). Reject
+      // anything that isn't lower-case hex of plausible length so two
+      // clients can't accidentally end up in different rooms because
+      // of unicode normalization.
+      if (typeof msg.room !== 'string' || !/^[a-f0-9]{16,128}$/.test(msg.room)) {
         send(ws, { type: 'error', error: 'invalid room id' });
         return;
       }
