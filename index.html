@@ -2088,6 +2088,26 @@
     return null;
   };
 
+  // Insert a message div at its chronological position. Live messages
+  // (ts ~= now) almost always slot in at the end and we auto-scroll;
+  // older messages back-filled by gossip slot in above without yanking
+  // the scroll position. Every msg div carries data-ts for comparison.
+  const insertMsgByTs = (div, ts) => {
+    div.dataset.ts = String(ts);
+    const list = els.messages;
+    const last = list.lastElementChild;
+    if (!last || Number(last.dataset.ts || 0) <= ts) {
+      list.appendChild(div);
+      list.scrollTop = list.scrollHeight;
+      return;
+    }
+    for (let i = list.children.length - 2; i >= 0; i--) {
+      const c = list.children[i];
+      if (Number(c.dataset.ts || 0) <= ts) { c.after(div); return; }
+    }
+    list.prepend(div);
+  };
+
   const addMessage = (kind, text, senderOverride, gossipMeta) => {
     els.emptyState?.remove();
     const div = document.createElement('div');
@@ -2101,8 +2121,7 @@
       `<span class="msg-sender">${escapeHtml(sender)}</span>` +
       `<div>${escapeHtml(text)}</div>` +
       `<div class="msg-meta">${fmtTime(new Date(ts))}</div>`;
-    els.messages.appendChild(div);
-    els.messages.scrollTop = els.messages.scrollHeight;
+    insertMsgByTs(div, ts);
     // Persist (fire-and-forget); prune occasionally.
     const cid = currentConversationId();
     if (cid) {
@@ -2133,9 +2152,6 @@
     const msgs = await idbGetRoomMessages(cid, MESSAGES_PER_ROOM_CAP);
     if (!msgs.length) return;
     els.emptyState?.remove();
-    // Order by wall-clock ts so messages back-filled via gossip
-    // (which may arrive after newer live messages) slot into the
-    // right place. IDB id is the tiebreaker for equal timestamps.
     msgs.sort((a, b) => (a.ts || 0) - (b.ts || 0) || (a.id || 0) - (b.id || 0));
     for (const m of msgs) {
       const div = document.createElement('div');
@@ -2144,13 +2160,12 @@
         `<span class="msg-sender">${escapeHtml(m.sender || 'Peer')}</span>` +
         `<div>${escapeHtml(m.text || '')}</div>` +
         `<div class="msg-meta">${fmtTime(new Date(m.ts || Date.now()))}</div>`;
-      els.messages.appendChild(div);
+      insertMsgByTs(div, m.ts || 0);
     }
     const divider = document.createElement('div');
     divider.className = 'msg system';
     divider.textContent = `— ${msgs.length} message${msgs.length > 1 ? 's' : ''} restored from this room —`;
-    els.messages.appendChild(divider);
-    els.messages.scrollTop = els.messages.scrollHeight;
+    insertMsgByTs(divider, Date.now());
   };
 
   const addSystem = (text) => {
@@ -2158,8 +2173,7 @@
     const div = document.createElement('div');
     div.className = 'msg system';
     div.textContent = `— ${text} —`;
-    els.messages.appendChild(div);
-    els.messages.scrollTop = els.messages.scrollHeight;
+    insertMsgByTs(div, Date.now());
   };
 
   const addCallEvent = (text, ended = false) => {
@@ -2170,8 +2184,7 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
       <span>${text} · ${fmtTime(new Date())}</span>
     `;
-    els.messages.appendChild(div);
-    els.messages.scrollTop = els.messages.scrollHeight;
+    insertMsgByTs(div, Date.now());
   };
 
   const addFileMessage = (kind, name, size, id, senderOverride) => {
@@ -2195,8 +2208,7 @@
       </div>
       <div class="msg-meta" style="padding:0 14px 8px;">${fmtTime(new Date())}</div>
     `;
-    els.messages.appendChild(div);
-    els.messages.scrollTop = els.messages.scrollHeight;
+    insertMsgByTs(div, Date.now());
     return div;
   };
   const updateFileProgress = (msgEl, sent, total) => {
