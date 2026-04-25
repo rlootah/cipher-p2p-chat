@@ -50,7 +50,10 @@ const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 256 * 1024 })
 
 // room -> Map<peerId, ws>
 const rooms = new Map();
-const ROOM_MAX = 6;
+// Hard cap on a single room's membership. The client uses a sparse
+// mesh + gossip layer for chat sync, so this can comfortably exceed
+// the old full-mesh practical limit of ~6.
+const ROOM_MAX = 32;
 
 function send(ws, obj) {
   if (ws.readyState !== 1) return;

@@ -1223,10 +1223,11 @@
      ════════════════════════════════════════════════════════════════════ */
 
   const DB_NAME = 'cipher-id';
-  const DB_VERSION = 2;
+  const DB_VERSION = 3;
   const STORE_ID = 'identity';
   const STORE_PEERS = 'peers';
   const STORE_MESSAGES = 'messages';
+  const STORE_GOSSIP = 'gossip';
   const MESSAGES_PER_ROOM_CAP = 500;
 
   const openDB = () => new Promise((resolve, reject) => {
@@ -1238,6 +1239,10 @@
       if (!db.objectStoreNames.contains(STORE_MESSAGES)) {
         const s = db.createObjectStore(STORE_MESSAGES, { keyPath: 'id', autoIncrement: true });
         s.createIndex('roomId', 'roomId', { unique: false });
+      }
+      // v3: per-room gossip state (outgoing seq counter, etc.)
+      if (!db.objectStoreNames.contains(STORE_GOSSIP)) {
+        db.createObjectStore(STORE_GOSSIP);
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -2083,7 +2088,7 @@
     return null;
   };
 
-  const addMessage = (kind, text, senderOverride) => {
+  const addMessage = (kind, text, senderOverride, gossipMeta) => {
     els.emptyState?.remove();
     const div = document.createElement('div');
     div.className = `msg ${kind}`;
@@ -2091,7 +2096,7 @@
     if (senderOverride) sender = senderOverride;
     else if (kind === 'outgoing') sender = myNickname || 'You';
     else sender = peerDisplayName() || 'Peer';
-    const ts = Date.now();
+    const ts = (gossipMeta && typeof gossipMeta.ts === 'number') ? gossipMeta.ts : Date.now();
     div.innerHTML =
       `<span class="msg-sender">${escapeHtml(sender)}</span>` +
       `<div>${escapeHtml(text)}</div>` +
@@ -2101,7 +2106,14 @@
     // Persist (fire-and-forget); prune occasionally.
     const cid = currentConversationId();
     if (cid) {
-      idbAppendMessage({ roomId: cid, kind, text, sender, ts });
+      const rec = { roomId: cid, kind, text, sender, ts };
+      if (gossipMeta) {
+        rec.gid = gossipMeta.gid;
+        rec.sfp = gossipMeta.sfp;
+        rec.seq = gossipMeta.seq;
+        rec.env = gossipMeta.env;
+      }
+      idbAppendMessage(rec);
       if (Math.random() < 0.02) idbPruneRoomMessages(cid);
     }
     // Mobile: flag the settings button if user is in Setup drawer when
@@ -2121,7 +2133,10 @@
     const msgs = await idbGetRoomMessages(cid, MESSAGES_PER_ROOM_CAP);
     if (!msgs.length) return;
     els.emptyState?.remove();
-    // Sort by id (insertion order) to be safe; IDB cursor already iterates key order.
+    // Order by wall-clock ts so messages back-filled via gossip
+    // (which may arrive after newer live messages) slot into the
+    // right place. IDB id is the tiebreaker for equal timestamps.
+    msgs.sort((a, b) => (a.ts || 0) - (b.ts || 0) || (a.id || 0) - (b.id || 0));
     for (const m of msgs) {
       const div = document.createElement('div');
       div.className = `msg ${m.kind}`;
@@ -2768,6 +2783,160 @@
     roomWS.send(JSON.stringify({ type: 'signal', to, payload: enc }));
   };
 
+  /* ════════════════════════════════════════════════════════════════════
+     GOSSIP LAYER — store-and-forward chat sync over a sparse mesh.
+
+     Each chat message is wrapped in a signed envelope:
+        { k:'g', t:'txt', gid, sfp, seq, ts, body, pk, sig }
+     where:
+        gid  — globally unique message id (sfp:seq); used for dedup
+        sfp  — sender identity fingerprint
+        seq  — sender's monotonic counter for this room
+        pk   — sender's public JWK (so any forwarder can be verified)
+        sig  — ECDSA over the canonical envelope sans `sig`
+
+     Forwarding rule: when a peer receives a gid they haven't seen, they
+     verify, persist, display, and re-broadcast to every connected peer
+     except the one it came from. Cycles terminate via the dedup table.
+
+     Sync on data-channel open: peers exchange a "have-vector" of
+     `{ sfp: latest_seq }`, then request gaps with `want` and stream
+     stored envelopes back as `batch`. ═══════════════════════════════ */
+
+  // Per-room gossip state — cleared on roomLeave / meshClearAll.
+  let gossipSeen = null;       // Set<gid> — for dedup
+  let gossipMySeq = 0;         // my outgoing counter (room-scoped)
+  let gossipPubKeys = null;    // Map<sfp, CryptoKey> — verified pubkeys cache
+  const GOSSIP_BATCH_MAX = 50; // cap entries per batch reply
+
+  const gossipResetState = () => {
+    gossipSeen = new Set();
+    gossipMySeq = 0;
+    gossipPubKeys = new Map();
+  };
+
+  const gossipSeqKey = (cid) => 'seq:' + cid;
+  const gossipLoadSeq = async (cid) => {
+    try {
+      const v = await idbGet(STORE_GOSSIP, gossipSeqKey(cid));
+      gossipMySeq = (typeof v === 'number') ? v : 0;
+    } catch { gossipMySeq = 0; }
+  };
+  const gossipSaveSeq = async (cid) => {
+    try { await idbSet(STORE_GOSSIP, gossipSeqKey(cid), gossipMySeq); }
+    catch (e) { console.warn('gossip seq save failed', e); }
+  };
+
+  // Canonical bytes for signing/verifying — JSON of the envelope minus `sig`.
+  const gossipCanonical = (env) => {
+    const { sig: _sig, ...rest } = env;
+    return new TextEncoder().encode(JSON.stringify(rest));
+  };
+
+  const gossipBuild = async (kind, body) => {
+    if (!myIdentity) throw new Error('No identity');
+    if (!roomIdHex) throw new Error('Not in a room');
+    gossipMySeq += 1;
+    const env = {
+      k: 'g',
+      t: kind,
+      sfp: myIdentity.fingerprint,
+      seq: gossipMySeq,
+      ts: Date.now(),
+      body,
+      pk: myIdentity.publicJwk,
+    };
+    env.gid = env.sfp + ':' + env.seq;
+    const sig = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      myIdentity.keyPair.privateKey,
+      gossipCanonical(env)
+    );
+    env.sig = b64uEncode(sig);
+    // Persist seq fire-and-forget so we don't reuse on reload.
+    gossipSaveSeq(currentConversationId());
+    return env;
+  };
+
+  // Verify an envelope. Returns true if signature checks out and sfp
+  // matches the inline public key. Caches the imported pubkey.
+  const gossipVerify = async (env) => {
+    if (!env || env.k !== 'g' || typeof env.gid !== 'string') return false;
+    if (typeof env.sfp !== 'string' || typeof env.seq !== 'number') return false;
+    if (typeof env.sig !== 'string' || !env.pk) return false;
+    if (env.gid !== env.sfp + ':' + env.seq) return false;
+    let pubKey = gossipPubKeys.get(env.sfp);
+    if (!pubKey) {
+      try {
+        pubKey = await crypto.subtle.importKey(
+          'jwk', env.pk,
+          { name: 'ECDSA', namedCurve: 'P-256' },
+          true, ['verify']
+        );
+      } catch { return false; }
+      const fp = await computeFingerprint(pubKey);
+      if (fp !== env.sfp) return false; // pk doesn't match claimed sfp
+      gossipPubKeys.set(env.sfp, pubKey);
+    }
+    let sig;
+    try { sig = b64uDecode(env.sig); } catch { return false; }
+    try {
+      return await crypto.subtle.verify(
+        { name: 'ECDSA', hash: 'SHA-256' },
+        pubKey, sig, gossipCanonical(env)
+      );
+    } catch { return false; }
+  };
+
+  // Forward a verified envelope to every connected peer EXCEPT the one
+  // it came from (skipPeerId). Cycles die via the dedup set.
+  const gossipForward = (env, skipPeerId) => {
+    const payload = JSON.stringify(env);
+    for (const [pid, e] of meshPeers) {
+      if (pid === skipPeerId) continue;
+      if (e.dc && e.dc.readyState === 'open') {
+        try { e.dc.send(payload); } catch {}
+      }
+    }
+  };
+
+  // Build a have-vector { sfp: maxSeq } from the local store for the
+  // current conversation. Used to negotiate sync on dc open.
+  const gossipBuildHaveVector = async () => {
+    const cid = currentConversationId();
+    if (!cid) return {};
+    const msgs = await idbGetRoomMessages(cid, 100000);
+    const v = {};
+    for (const m of msgs) {
+      if (typeof m.sfp !== 'string' || typeof m.seq !== 'number') continue;
+      if (!v[m.sfp] || m.seq > v[m.sfp]) v[m.sfp] = m.seq;
+    }
+    // Include our own outgoing seq even if no messages in store yet
+    // (unlikely but keeps the vector authoritative for our identity).
+    if (myIdentity && gossipMySeq > 0) {
+      const fp = myIdentity.fingerprint;
+      if (!v[fp] || gossipMySeq > v[fp]) v[fp] = gossipMySeq;
+    }
+    return v;
+  };
+
+  // Find stored envelopes for a (sfp, seq-range) request. Caps results.
+  const gossipFindBatch = async (sfp, fromSeq, toSeq) => {
+    const cid = currentConversationId();
+    if (!cid) return [];
+    const all = await idbGetRoomMessages(cid, 100000);
+    const out = [];
+    for (const m of all) {
+      if (m.sfp !== sfp) continue;
+      if (typeof m.seq !== 'number') continue;
+      if (m.seq < fromSeq || m.seq > toSeq) continue;
+      if (!m.env) continue;
+      try { out.push(JSON.parse(m.env)); } catch {}
+      if (out.length >= GOSSIP_BATCH_MAX) break;
+    }
+    return out;
+  };
+
   const roomResetConnection = () => {
     try { if (dc) dc.close(); } catch {}
     try { if (pc) pc.close(); } catch {}
@@ -2787,6 +2956,12 @@
      with that specific peer's nickname/fingerprint. Voice stays
      1:1 for now — it's disabled while the mesh is active. ───── */
   const meshPeers = new Map(); // peerId -> entry
+  // Sparse-mesh degree: a newcomer initiates direct WebRTC channels to
+  // at most this many existing peers. Anyone they don't connect to
+  // directly will still receive chat via gossip forwarding from the K
+  // peers they did connect to. Bigger K = more redundancy, more setup
+  // cost; smaller K = leaner mesh, more reliance on gossip paths.
+  const MESH_DEGREE = 3;
 
   const meshInAnyRoom  = () => meshPeers.size > 0;
   const meshConnectedCount = () => {
@@ -3114,6 +3289,9 @@
       startMeshHeartbeat();
       updateMeshStatus();
       updateNicknameLockUI();
+      // Kick off chat sync: exchange have-vectors so each side can pull
+      // anything the other has missed (history, offline messages, etc.).
+      gossipSendHave(entry).catch(e => console.warn('gossip have failed', e));
       // If we're already on call, invite the newcomer so they get the prompt.
       if (inCall) {
         try { channel.send(JSON.stringify({ k: 'call-invite' })); } catch {}
@@ -3245,6 +3423,77 @@
     catch (e) { console.warn('addIceCandidate failed', e); }
   };
 
+  // Process a verified gossip envelope: dedup, persist, display, forward.
+  // `fromPeerId` is the data-channel peer this envelope arrived on (skip
+  // it when forwarding). For envelopes pulled from a sync `batch`, pass
+  // the same peer so we don't echo back to them.
+  const gossipIngest = async (env, fromPeerId) => {
+    if (!gossipSeen) return;
+    if (gossipSeen.has(env.gid)) return;
+    if (!(await gossipVerify(env))) return;
+    gossipSeen.add(env.gid);
+    if (env.t === 'txt') {
+      // Prefer the verified identity fingerprint to label the sender.
+      // Fall back to nickname from a known peer entry, then a short hash.
+      let label = null;
+      for (const [, e] of meshPeers) {
+        if (e.identityFp === env.sfp) { label = meshPeerDisplayName(e); break; }
+      }
+      if (!label && myIdentity && env.sfp === myIdentity.fingerprint) {
+        label = myNickname || 'You';
+      }
+      if (!label) label = env.sfp.slice(0, 8);
+      const kind = (myIdentity && env.sfp === myIdentity.fingerprint) ? 'outgoing' : 'incoming';
+      addMessage(kind, String(env.body || ''), label, {
+        gid: env.gid, sfp: env.sfp, seq: env.seq, ts: env.ts,
+        env: JSON.stringify(env),
+      });
+      if (kind === 'incoming' && els.mainView?.dataset.view === 'setup') {
+        els.btnSettings?.classList.add('has-alert');
+      }
+    }
+    gossipForward(env, fromPeerId);
+  };
+
+  // Send our have-vector to a single peer's data channel.
+  const gossipSendHave = async (entry) => {
+    if (!entry.dc || entry.dc.readyState !== 'open') return;
+    const v = await gossipBuildHaveVector();
+    try { entry.dc.send(JSON.stringify({ k: 'have', v })); } catch {}
+  };
+
+  // We received the peer's have-vector — request anything we're missing.
+  const gossipOnHave = async (entry, remoteV) => {
+    if (!entry.dc || entry.dc.readyState !== 'open') return;
+    const localV = await gossipBuildHaveVector();
+    for (const sfp of Object.keys(remoteV || {})) {
+      const remoteSeq = remoteV[sfp] | 0;
+      const localSeq = localV[sfp] | 0;
+      if (remoteSeq > localSeq) {
+        try {
+          entry.dc.send(JSON.stringify({
+            k: 'want', s: sfp, from: localSeq + 1, to: remoteSeq,
+          }));
+        } catch {}
+      }
+    }
+  };
+
+  const gossipOnWant = async (entry, msg) => {
+    if (!entry.dc || entry.dc.readyState !== 'open') return;
+    if (typeof msg.s !== 'string' || typeof msg.from !== 'number' || typeof msg.to !== 'number') return;
+    const items = await gossipFindBatch(msg.s, msg.from, msg.to);
+    if (!items.length) return;
+    try { entry.dc.send(JSON.stringify({ k: 'batch', m: items })); } catch {}
+  };
+
+  const gossipOnBatch = async (entry, msg) => {
+    if (!Array.isArray(msg.m)) return;
+    for (const env of msg.m) {
+      await gossipIngest(env, entry.peerId);
+    }
+  };
+
   const meshHandleIncoming = (entry, data) => {
     lastPeerActivity = Date.now();
     entry.lastHeardFrom = Date.now();
@@ -3255,7 +3504,13 @@
       try { msg = JSON.parse(data); }
       catch { return addMessage('incoming', data, displayName); }
       switch (msg.k) {
+        case 'g':            gossipIngest(msg, entry.peerId); break;
+        case 'have':         gossipOnHave(entry, msg.v || {}); break;
+        case 'want':         gossipOnWant(entry, msg); break;
+        case 'batch':        gossipOnBatch(entry, msg); break;
         case 'txt':
+          // Old-format message from a pre-gossip client — display only,
+          // don't persist with gid (no signature, can't be forwarded).
           addMessage('incoming', msg.b, displayName);
           if (els.mainView?.dataset.view === 'setup') {
             els.btnSettings?.classList.add('has-alert');
@@ -3335,6 +3590,7 @@
     roomKey = null;
     roomIdHex = null;
     myRoomPeerId = null;
+    gossipResetState();
     meshClearAll();
     if (els.btnJoinRoom) {
       els.btnJoinRoom.disabled = false;
@@ -3354,7 +3610,18 @@
     roomIdHex = id;
     roomKey = key;
     historyLoadedFor = null;
-    loadAndRenderHistory('room_' + roomIdHex);
+    gossipResetState();
+    const cid = 'room_' + roomIdHex;
+    await gossipLoadSeq(cid);
+    // Pre-populate the dedup set from local history so we don't re-process
+    // messages we already have when sync handshake replies arrive.
+    try {
+      const prior = await idbGetRoomMessages(cid, 100000);
+      for (const m of prior) {
+        if (typeof m.gid === 'string') gossipSeen.add(m.gid);
+      }
+    } catch (e) { console.warn('gossip seed failed', e); }
+    loadAndRenderHistory(cid);
 
     const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
     setRoomStatus('Connecting to relay…', 'active');
@@ -3406,10 +3673,20 @@
             setStatus('connecting', 'Waiting for peers…');
             toast('Room ready — share the passcode with your peers');
           } else {
-            setRoomStatus(`Connecting to ${existing.length} peer${existing.length > 1 ? 's' : ''}`, 'active');
+            // Sparse mesh: connect to a random subset of up to
+            // MESH_DEGREE existing peers. Gossip fills in the rest.
+            const shuffled = existing.slice();
+            for (let i = shuffled.length - 1; i > 0; i--) {
+              const j = Math.floor(Math.random() * (i + 1));
+              [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+            }
+            const picks = shuffled.slice(0, MESH_DEGREE);
+            setRoomStatus(
+              `Connecting to ${picks.length} of ${existing.length} peer${existing.length > 1 ? 's' : ''}`,
+              'active'
+            );
             setStatus('connecting', 'Building mesh…');
-            // Newcomer always initiates to existing members.
-            for (const pid of existing) {
+            for (const pid of picks) {
               meshInitiate(pid).catch(e => {
                 console.error('mesh initiate failed', pid, e);
                 toast('Handshake failed for a peer', true);
@@ -3709,18 +3986,25 @@
   });
 
   /* ── Send text ────────────────────────────────────────────── */
-  const sendText = () => {
+  const sendText = async () => {
     const text = els.textInput.value.trim();
     if (!text) return;
-    const payload = JSON.stringify({ k: 'txt', b: text });
     if (meshInAnyRoom()) {
+      let env;
+      try { env = await gossipBuild('txt', text); }
+      catch (e) { console.warn('gossip build failed', e); toast('Send failed', true); return; }
+      const payload = JSON.stringify(env);
       const n = meshBroadcastString(payload);
       if (n === 0) { toast('No peers connected', true); return; }
+      gossipSeen.add(env.gid); // we already have it, don't accept echoes
+      addMessage('outgoing', text, undefined, {
+        gid: env.gid, sfp: env.sfp, seq: env.seq, ts: env.ts, env: payload,
+      });
     } else {
       if (!dc || dc.readyState !== 'open') return;
-      dc.send(payload);
+      dc.send(JSON.stringify({ k: 'txt', b: text }));
+      addMessage('outgoing', text);
     }
-    addMessage('outgoing', text);
     els.textInput.value = '';
   };
   els.btnSend.addEventListener('click', sendText);
