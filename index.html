@@ -2900,23 +2900,26 @@
     }
   };
 
-  // Build a have-vector { sfp: maxSeq } from the local store for the
-  // current conversation. Used to negotiate sync on dc open.
+  // Build a have-vector { sfp: [min, max] } from the local store for
+  // the current conversation. We track BOTH ends of the range, not
+  // just max, so a peer with older history can be detected and pulled
+  // even when their max is below ours. (Without min, "I have stuff
+  // you don't" only shows up in one direction.)
   const gossipBuildHaveVector = async () => {
     const cid = currentConversationId();
     if (!cid) return {};
     const msgs = await idbGetRoomMessages(cid, 100000);
     const v = {};
+    const note = (sfp, seq) => {
+      const cur = v[sfp];
+      if (!cur) v[sfp] = [seq, seq];
+      else { if (seq < cur[0]) cur[0] = seq; if (seq > cur[1]) cur[1] = seq; }
+    };
     for (const m of msgs) {
       if (typeof m.sfp !== 'string' || typeof m.seq !== 'number') continue;
-      if (!v[m.sfp] || m.seq > v[m.sfp]) v[m.sfp] = m.seq;
+      note(m.sfp, m.seq);
     }
-    // Include our own outgoing seq even if no messages in store yet
-    // (unlikely but keeps the vector authoritative for our identity).
-    if (myIdentity && gossipMySeq > 0) {
-      const fp = myIdentity.fingerprint;
-      if (!v[fp] || gossipMySeq > v[fp]) v[fp] = gossipMySeq;
-    }
+    if (myIdentity && gossipMySeq > 0) note(myIdentity.fingerprint, gossipMySeq);
     return v;
   };
 
@@ -3463,19 +3466,28 @@
   };
 
   // We received the peer's have-vector — request anything we're missing.
+  // Each entry is [min, max]; we ask for the gaps below our min and
+  // above our max so older AND newer history both get pulled in.
   const gossipOnHave = async (entry, remoteV) => {
     if (!entry.dc || entry.dc.readyState !== 'open') return;
     const localV = await gossipBuildHaveVector();
+    const wants = [];
     for (const sfp of Object.keys(remoteV || {})) {
-      const remoteSeq = remoteV[sfp] | 0;
-      const localSeq = localV[sfp] | 0;
-      if (remoteSeq > localSeq) {
-        try {
-          entry.dc.send(JSON.stringify({
-            k: 'want', s: sfp, from: localSeq + 1, to: remoteSeq,
-          }));
-        } catch {}
+      const r = remoteV[sfp];
+      if (!Array.isArray(r) || r.length !== 2) continue;
+      const [rMin, rMax] = [r[0] | 0, r[1] | 0];
+      if (rMax < rMin) continue;
+      const l = localV[sfp];
+      if (!l) {
+        wants.push({ k: 'want', s: sfp, from: rMin, to: rMax });
+        continue;
       }
+      const [lMin, lMax] = [l[0] | 0, l[1] | 0];
+      if (rMax > lMax) wants.push({ k: 'want', s: sfp, from: lMax + 1, to: rMax });
+      if (rMin < lMin) wants.push({ k: 'want', s: sfp, from: rMin, to: lMin - 1 });
+    }
+    for (const w of wants) {
+      try { entry.dc.send(JSON.stringify(w)); } catch {}
     }
   };
 
