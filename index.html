@@ -4095,9 +4095,15 @@
     const { id, key } = await deriveRoom(passcode);
     roomIdHex = id;
     roomKey = key;
-    historyLoadedFor = null;
     gossipResetState();
     const cid = 'room_' + roomIdHex;
+    // IMPORTANT: do NOT reset historyLoadedFor here. roomJoin runs on
+    // every auto-reconnect (transient WS blip) and loadAndRenderHistory
+    // wipes els.messages.innerHTML on the first call for a cid. If we
+    // reset, every reconnect blows away every chat / file message we
+    // rendered live during the session. The dedup check inside
+    // loadAndRenderHistory already handles the "switching rooms" case
+    // — a different cid will trigger a fresh render automatically.
     await gossipLoadSeq(cid);
     // Pre-populate the dedup set from local history so we don't re-process
     // messages we already have when sync handshake replies arrive.
