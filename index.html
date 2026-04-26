@@ -3410,7 +3410,14 @@
       if (meshConnectedCount() === 0 && !dc) disableComposer();
       updateMeshStatus();
     };
-    channel.onerror = (e) => console.warn('mesh dc error', entry.peerId, e);
+    channel.onerror = (e) => {
+      // "User-Initiated Abort, reason=Close called" fires on every
+      // explicit close() and is just noise — suppress it so the
+      // console only shows actual transport-level errors.
+      const msg = (e && e.error && e.error.message) || (e && e.message) || '';
+      if (/Close called/i.test(msg)) return;
+      console.warn('mesh dc error', entry.peerId, e);
+    };
     channel.onmessage = (ev) => meshHandleIncoming(entry, ev.data);
   };
 
@@ -3825,11 +3832,16 @@
       ws.onclose = () => {
         if (ws === roomWS) {
           roomWS = null;
-          // Drop any stale per-peer mesh state — RTCPeerConnections
-          // built during this session are now unreachable for ICE
-          // restarts (signaling is gone), so their entries would
-          // poison the next reconnect.
-          meshClearAll();
+          // IMPORTANT: do NOT meshClearAll() here. The relay carries
+          // only signaling; once peer connections are negotiated they
+          // stay alive over UDP/TCP without the relay. Tearing them
+          // down on every transient ws blip breaks ongoing chat /
+          // file transfers and produces a flood of "Close called"
+          // RTCErrorEvents. WebRTC's own connectionstatechange will
+          // fire `disconnected`/`failed` if a peer is actually gone,
+          // and meshRemoveEntry handles cleanup from there. The next
+          // roomJoin (auto-reconnect or manual) clears any leftover
+          // entries before negotiating a fresh mesh.
           if (roomDesired) {
             // Unexpected disconnect — keep "In Room" UI and retry.
             scheduleRoomReconnect();
