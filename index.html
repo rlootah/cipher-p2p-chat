@@ -1139,12 +1139,27 @@
   let lastPeerActivity = Date.now();
   let iceRestartInProgress = false;
 
+  // STUN alone fails for many mobile carrier networks (symmetric NAT,
+  // CGNAT) — peers join the relay's room successfully but their
+  // RTCPeerConnection never reaches `connected` and the data channel
+  // never opens. The OpenRelay public TURN servers (free, run by
+  // metered.ca) give us a relayed path of last resort over UDP/TCP/TLS.
+  // For higher reliability or volume, swap in a dedicated TURN server.
   const RTC_CONFIG = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' }
-    ]
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      {
+        urls: [
+          'turn:openrelay.metered.ca:80',
+          'turn:openrelay.metered.ca:443',
+          'turn:openrelay.metered.ca:443?transport=tcp',
+        ],
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+      },
+    ],
   };
 
   /* ── UI helpers ──────────────────────────────────────────── */
@@ -2762,15 +2777,21 @@
   };
 
   const deriveRoom = async (passcode) => {
+    // Normalize to NFC + trim so the same passcode typed on different
+    // keyboards (iOS, Android, desktop) hashes to the same room id.
+    // Without this, an autocorrected character or alt-keyboard glyph
+    // can produce a different code-point sequence and silently put
+    // mobile users in a different room than desktop.
+    const norm = (passcode || '').normalize('NFC').trim();
     const enc = new TextEncoder();
     const idBytes = await crypto.subtle.digest(
       'SHA-256',
-      enc.encode('cipher-room-v1|' + passcode)
+      enc.encode('cipher-room-v1|' + norm)
     );
     const id = Array.from(new Uint8Array(idBytes))
       .map(b => b.toString(16).padStart(2, '0')).join('');
     const km = await crypto.subtle.importKey(
-      'raw', enc.encode(passcode),
+      'raw', enc.encode(norm),
       { name: 'PBKDF2' }, false, ['deriveKey']
     );
     const key = await crypto.subtle.deriveKey(
