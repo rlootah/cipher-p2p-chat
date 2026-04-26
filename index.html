@@ -578,7 +578,21 @@
   }
   .msg.outgoing .msg-sender { color: var(--dp-green-bright); text-align: right; }
   .msg.incoming .msg-sender { color: var(--dp-green-bright); }
-  .msg.file { padding: 0; overflow: hidden; }
+  .msg.file {
+    /* `padding: 0` + a min-height ensures the bubble is always visible
+       even when the children's flex layout was computed while the
+       parent .messages was display:none (for example during initial
+       render on the mobile setup view). Without min-height some
+       browsers cached the file div as h=0px and never recomputed the
+       layout when the chat panel was revealed. The `display: block`
+       is explicit so a stray `display: none` from any ancestor rule
+       can't accidentally apply to the bubble itself.
+       Children that need clipping (file-name with text-overflow) set
+       overflow: hidden themselves; we don't need it here. */
+    padding: 0;
+    display: block;
+    min-height: 64px;
+  }
   .msg.file .file-card {
     padding: 12px 14px; display: flex; align-items: center; gap: 12px;
   }
