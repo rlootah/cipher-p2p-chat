@@ -2096,8 +2096,8 @@
 
       switch (msg.k) {
         case 'txt':         addMessage('incoming', msg.b); break;
-        case 'file-meta':   onFileMeta(msg);   break;
-        case 'file-end':    onFileEnd(msg);    break;
+        case 'file-meta':   onFileMeta(msg, undefined, null);   break;
+        case 'file-end':    onFileEnd(msg, null);    break;
         case 'call-start':  onPeerCallStart(); break;
         case 'call-accept': onPeerCallAccept(); break;
         case 'call-decline':onPeerCallDecline(); break;
@@ -2111,8 +2111,9 @@
       const idLen = view.getUint8(0);
       const idBytes = new Uint8Array(data, 1, idLen);
       const id = new TextDecoder().decode(idBytes);
-      const chunk = data.slice(1 + idLen);
-      onFileChunk(id, chunk);
+      const chunkIdx = view.getUint32(1 + idLen, false);
+      const chunk = data.slice(1 + idLen + 4);
+      onFileChunk(id, chunkIdx, chunk, null);
     }
   };
 
@@ -2261,8 +2262,62 @@
     card.appendChild(a);
   };
 
-  /* ── File transfer ────────────────────────────────────────── */
+  /* ── File transfer ──────────────────────────────────────────
+     Files travel over the same sparse mesh as chat, but with a
+     gossip layer so every online peer receives them — not just the
+     sender's direct neighbors.
+
+     Wire formats:
+       file-meta  JSON  { k:'file-meta', id, name, size, type, chunks }
+       file-end   JSON  { k:'file-end',  id }
+       chunk      binary [idLen:u8][id:bytes][chunkIdx:u32-be][data...]
+
+     Each peer maintains incomingFiles[id] with a sparse `chunks`
+     array indexed by chunkIdx. Receiving a chunk we don't yet have
+     (a) writes it into the array, (b) re-broadcasts to every other
+     connected peer except the one it came from. Cycles die at the
+     dedup check (`if (f.chunks[chunkIdx]) return`). When haveCount
+     hits totalChunks (derivable from size / CHUNK_SIZE), the file
+     is assembled and the download link is rendered. ─────────── */
   const CHUNK_SIZE = 16 * 1024;
+  // Buffer chunks that arrive before their file-meta. Cleared as
+  // soon as the meta is processed (or when the file completes).
+  const pendingFileChunks = new Map(); // fileId -> Map<chunkIdx, chunk>
+  // Every file id we've ever processed this session. file-meta and
+  // file-chunk gossip can revisit a completed file via different
+  // mesh paths; without this set, we'd re-render and re-finalize on
+  // every duplicate. Survives deletion of incomingFiles[id].
+  const completedFileIds = new Set();
+
+  const buildChunkPacket = (id, chunkIdx, chunk) => {
+    const idBytes = new TextEncoder().encode(id);
+    const headerLen = 1 + idBytes.length + 4;
+    const total = headerLen + chunk.byteLength;
+    const out = new Uint8Array(total);
+    out[0] = idBytes.length;
+    out.set(idBytes, 1);
+    new DataView(out.buffer).setUint32(1 + idBytes.length, chunkIdx, false);
+    out.set(new Uint8Array(chunk), headerLen);
+    return out.buffer;
+  };
+
+  const forwardJsonToPeers = (jsonStr, skipPeerId) => {
+    for (const [pid, e] of meshPeers) {
+      if (pid === skipPeerId) continue;
+      if (e.dc && e.dc.readyState === 'open') {
+        try { e.dc.send(jsonStr); } catch {}
+      }
+    }
+  };
+  const forwardBinaryToPeers = (buf, skipPeerId) => {
+    for (const [pid, e] of meshPeers) {
+      if (pid === skipPeerId) continue;
+      if (e.dc && e.dc.readyState === 'open') {
+        try { e.dc.send(buf); } catch {}
+      }
+    }
+  };
+
   const sendFileMesh = async (file) => {
     const open = meshConnectedCount();
     console.log('[upload] mesh path; open peer channels:', open);
@@ -2272,7 +2327,11 @@
       return;
     }
     const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
-    const meta = JSON.stringify({ k: 'file-meta', id, name: file.name, size: file.size, type: file.type });
+    const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+    const meta = JSON.stringify({
+      k: 'file-meta', id, name: file.name, size: file.size,
+      type: file.type, chunks: totalChunks,
+    });
     const sent = meshBroadcastString(meta);
     console.log('[upload] file-meta sent to', sent, 'peers');
     if (sent === 0) {
@@ -2281,22 +2340,17 @@
       return;
     }
     const msgEl = addFileMessage('outgoing', file.name, file.size, id);
-    const idBytes = new TextEncoder().encode(id);
-    const headerLen = 1 + idBytes.length;
-    let offset = 0;
+    let offset = 0, chunkIdx = 0;
     try {
       while (offset < file.size) {
         await meshWaitForDrain();
         const slice = file.slice(offset, offset + CHUNK_SIZE);
         const buf = await slice.arrayBuffer();
-        const out = new Uint8Array(headerLen + buf.byteLength);
-        out[0] = idBytes.length; out.set(idBytes, 1); out.set(new Uint8Array(buf), headerLen);
-        const n = meshBroadcastBinary(out.buffer);
-        if (n === 0) {
-          // All channels closed mid-stream — surface it instead of looping forever.
-          throw new Error('all channels closed mid-transfer');
-        }
+        const packet = buildChunkPacket(id, chunkIdx, buf);
+        const n = meshBroadcastBinary(packet);
+        if (n === 0) throw new Error('all channels closed mid-transfer');
         offset += buf.byteLength;
+        chunkIdx += 1;
         updateFileProgress(msgEl, offset, file.size);
       }
       meshBroadcastString(JSON.stringify({ k: 'file-end', id }));
@@ -2341,20 +2395,90 @@
     dc.send(JSON.stringify({ k: 'file-end', id }));
     finishFileMessage(msgEl, file, file.name);
   };
-  const onFileMeta = (msg, senderName) => {
-    const msgEl = addFileMessage('incoming', msg.name, msg.size, msg.id, senderName);
-    incomingFiles.set(msg.id, { name: msg.name, size: msg.size, type: msg.type, chunks: [], received: 0, msgEl });
-  };
-  const onFileChunk = (id, chunk) => {
-    const f = incomingFiles.get(id); if (!f) return;
-    f.chunks.push(chunk); f.received += chunk.byteLength;
-    updateFileProgress(f.msgEl, f.received, f.size);
-  };
-  const onFileEnd = ({ id }) => {
-    const f = incomingFiles.get(id); if (!f) return;
-    const blob = new Blob(f.chunks, { type: f.type || 'application/octet-stream' });
+  const tryFinalizeFile = (f) => {
+    if (!f.totalChunks || f.haveCount < f.totalChunks) return;
+    const ordered = [];
+    for (let i = 0; i < f.totalChunks; i++) ordered.push(f.chunks[i]);
+    const blob = new Blob(ordered, { type: f.type || 'application/octet-stream' });
     finishFileMessage(f.msgEl, blob, f.name);
-    incomingFiles.delete(id);
+    console.log('[upload] file complete', f.id, f.name, f.size + 'B');
+    completedFileIds.add(f.id);
+    incomingFiles.delete(f.id);
+    pendingFileChunks.delete(f.id);
+  };
+
+  // file-meta: dedup by id, register the incoming file, drain any
+  // chunks that arrived ahead of the meta, then forward to other peers.
+  const onFileMeta = (msg, senderName, fromPeerId) => {
+    // Dedup against in-flight AND completed files — gossip will deliver
+    // the same meta from multiple paths and we must NOT re-finalize.
+    if (incomingFiles.has(msg.id) || completedFileIds.has(msg.id)) return;
+    console.log('[upload] received file-meta', msg.id, msg.name, 'from', fromPeerId);
+    const totalChunks = msg.chunks || Math.max(1, Math.ceil(msg.size / CHUNK_SIZE));
+    const msgEl = addFileMessage('incoming', msg.name, msg.size, msg.id, senderName);
+    const f = {
+      id: msg.id, name: msg.name, size: msg.size, type: msg.type,
+      totalChunks, chunks: new Array(totalChunks), haveCount: 0, bytes: 0, msgEl,
+    };
+    incomingFiles.set(msg.id, f);
+    // Pull in any chunks that already arrived for this id.
+    const buffered = pendingFileChunks.get(msg.id);
+    if (buffered) {
+      for (const [idx, chunk] of buffered) {
+        if (idx >= totalChunks || f.chunks[idx]) continue;
+        f.chunks[idx] = chunk;
+        f.haveCount += 1;
+        f.bytes += chunk.byteLength;
+      }
+      pendingFileChunks.delete(msg.id);
+      updateFileProgress(f.msgEl, f.bytes, f.size);
+    }
+    // Forward the meta to peers other than the source so the file
+    // reaches the entire room — not just our direct neighborhood.
+    if (meshInAnyRoom()) {
+      forwardJsonToPeers(JSON.stringify(msg), fromPeerId);
+    }
+    tryFinalizeFile(f);
+  };
+
+  const onFileChunk = (id, chunkIdx, chunk, fromPeerId) => {
+    // Skip outright if we already finalized this file via gossip.
+    if (completedFileIds.has(id)) return;
+    let f = incomingFiles.get(id);
+    if (!f) {
+      // Chunk arrived before its meta — buffer until we know totalChunks
+      // and have a place to render progress. Still forward immediately
+      // so other peers (which may have meta) can finalize.
+      let pend = pendingFileChunks.get(id);
+      if (!pend) { pend = new Map(); pendingFileChunks.set(id, pend); }
+      if (!pend.has(chunkIdx)) {
+        pend.set(chunkIdx, chunk);
+        if (meshInAnyRoom()) {
+          forwardBinaryToPeers(buildChunkPacket(id, chunkIdx, chunk), fromPeerId);
+        }
+      }
+      return;
+    }
+    if (f.chunks[chunkIdx]) return; // dedup — already have this chunk
+    f.chunks[chunkIdx] = chunk;
+    f.haveCount += 1;
+    f.bytes += chunk.byteLength;
+    updateFileProgress(f.msgEl, f.bytes, f.size);
+    if (meshInAnyRoom()) {
+      forwardBinaryToPeers(buildChunkPacket(id, chunkIdx, chunk), fromPeerId);
+    }
+    tryFinalizeFile(f);
+  };
+
+  // file-end is mostly informational now (chunk count drives finalize),
+  // but we still forward it so all peers get the explicit signal.
+  const onFileEnd = ({ id }, fromPeerId) => {
+    const f = incomingFiles.get(id);
+    if (meshInAnyRoom()) {
+      forwardJsonToPeers(JSON.stringify({ k: 'file-end', id }), fromPeerId);
+    }
+    if (!f) return;
+    tryFinalizeFile(f);
   };
 
   /* ── VOICE CALL CONTROLS ──────────────────────────────────── */
@@ -2892,6 +3016,11 @@
     gossipSeen = new Set();
     gossipMySeq = 0;
     gossipPubKeys = new Map();
+    // Drop any half-received files — their chunks won't be valid in
+    // a different room context and the dedup table needs to be fresh.
+    if (typeof incomingFiles !== 'undefined') incomingFiles.clear();
+    if (typeof pendingFileChunks !== 'undefined') pendingFileChunks.clear();
+    if (typeof completedFileIds !== 'undefined') completedFileIds.clear();
   };
 
   const gossipSeqKey = (cid) => 'seq:' + cid;
@@ -3642,10 +3771,10 @@
           }
           break;
         case 'file-meta':
-          onFileMeta(msg, displayName);
+          onFileMeta(msg, displayName, entry.peerId);
           break;
         case 'file-end':
-          onFileEnd(msg);
+          onFileEnd(msg, entry.peerId);
           break;
         case 'call-invite':  meshOnCallInvite(entry); break;
         case 'call-accept':  meshOnCallAccept(entry); break;
@@ -3659,8 +3788,9 @@
       const idLen = view.getUint8(0);
       const idBytes = new Uint8Array(data, 1, idLen);
       const id = new TextDecoder().decode(idBytes);
-      const chunk = data.slice(1 + idLen);
-      onFileChunk(id, chunk);
+      const chunkIdx = view.getUint32(1 + idLen, false);
+      const chunk = data.slice(1 + idLen + 4);
+      onFileChunk(id, chunkIdx, chunk, entry.peerId);
     }
   };
 
