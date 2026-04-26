@@ -4217,9 +4217,16 @@
   });
 
   /* ── Send file ────────────────────────────────────────────── */
-  // The attach button is a <label for="fileInput">, so the browser opens
-  // the picker natively when tapped. No JS click bridge needed (and on
-  // iOS Safari, a JS-driven .click() on a hidden file input is unreliable).
+  // The attach button is a <label> with the file <input> nested inside,
+  // so the browser opens the picker natively when tapped. We also log
+  // every click on the label so silent failures (no picker, no change
+  // event, no error) are diagnosable from the console.
+  els.btnAttach.addEventListener('click', (e) => {
+    console.log('[upload] btnAttach clicked',
+      'classList=', els.btnAttach.className,
+      'fileInput.disabled=', els.fileInput.disabled,
+      'target=', e.target.tagName);
+  });
   els.fileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     // Reset the input early so picking the same file twice still
