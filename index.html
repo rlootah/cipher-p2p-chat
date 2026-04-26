@@ -1258,12 +1258,14 @@
      ════════════════════════════════════════════════════════════════════ */
 
   const DB_NAME = 'cipher-id';
-  const DB_VERSION = 3;
+  const DB_VERSION = 4;
   const STORE_ID = 'identity';
   const STORE_PEERS = 'peers';
   const STORE_MESSAGES = 'messages';
   const STORE_GOSSIP = 'gossip';
+  const STORE_FILES = 'files';
   const MESSAGES_PER_ROOM_CAP = 500;
+  const FILES_PER_ROOM_CAP = 50;
 
   const openDB = () => new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -1278,6 +1280,13 @@
       // v3: per-room gossip state (outgoing seq counter, etc.)
       if (!db.objectStoreNames.contains(STORE_GOSSIP)) {
         db.createObjectStore(STORE_GOSSIP);
+      }
+      // v4: persistent file blob store. Lets a late joiner pull files
+      // from any peer that has them, not just from the original sender
+      // who may have left. Keyed by file id, indexed by roomId.
+      if (!db.objectStoreNames.contains(STORE_FILES)) {
+        const s = db.createObjectStore(STORE_FILES, { keyPath: 'id' });
+        s.createIndex('roomId', 'roomId', { unique: false });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -1358,6 +1367,72 @@
         cursor.onerror = () => rej(cursor.error);
       });
     } catch (err) { console.warn('message clear failed', err); }
+  };
+
+  /* ── Persistent file blob store ───────────────────────────────
+     Keep completed files locally so a peer who joins later can pull
+     them from us — not just from the original uploader (who may
+     have left the room). Each row: { id, roomId, name, size, type,
+     blob, ts }. Bounded to FILES_PER_ROOM_CAP per room. */
+  const idbSaveFile = async (rec) => {
+    if (!rec || !rec.id || !rec.roomId || !rec.blob) return;
+    try {
+      const db = await openDB();
+      await new Promise((res, rej) => {
+        const tx = db.transaction(STORE_FILES, 'readwrite');
+        const r = tx.objectStore(STORE_FILES).put(rec);
+        r.onsuccess = () => res();
+        r.onerror   = () => rej(r.error);
+      });
+    } catch (err) { console.warn('file save failed', err); }
+  };
+
+  const idbGetFile = async (id) => {
+    try {
+      const db = await openDB();
+      return await new Promise((res, rej) => {
+        const tx = db.transaction(STORE_FILES, 'readonly');
+        const r = tx.objectStore(STORE_FILES).get(id);
+        r.onsuccess = () => res(r.result || null);
+        r.onerror   = () => rej(r.error);
+      });
+    } catch (err) { console.warn('file load failed', err); return null; }
+  };
+
+  const idbListRoomFiles = async (roomId) => {
+    try {
+      const db = await openDB();
+      return await new Promise((res, rej) => {
+        const out = [];
+        const tx = db.transaction(STORE_FILES, 'readonly');
+        const idx = tx.objectStore(STORE_FILES).index('roomId');
+        const cursor = idx.openCursor(IDBKeyRange.only(roomId));
+        cursor.onsuccess = (e) => {
+          const c = e.target.result;
+          if (c) { out.push(c.value); c.continue(); }
+          else res(out);
+        };
+        cursor.onerror = () => rej(cursor.error);
+      });
+    } catch (err) { console.warn('file list failed', err); return []; }
+  };
+
+  const idbPruneRoomFiles = async (roomId, keep = FILES_PER_ROOM_CAP) => {
+    try {
+      const all = await idbListRoomFiles(roomId);
+      if (all.length <= keep) return;
+      // Drop the oldest by ts.
+      all.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      const toDelete = all.slice(0, all.length - keep).map(r => r.id);
+      const db = await openDB();
+      await new Promise((res, rej) => {
+        const tx = db.transaction(STORE_FILES, 'readwrite');
+        const s = tx.objectStore(STORE_FILES);
+        for (const id of toDelete) s.delete(id);
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+      });
+    } catch (err) { console.warn('file prune failed', err); }
   };
 
   const idbGet = async (store, key) => {
@@ -2245,6 +2320,17 @@
       <div class="msg-meta" style="padding:0 14px 8px;">${fmtTime(new Date())}</div>
     `;
     insertMsgByTs(div, Date.now());
+    // On mobile, if the user is on the Setup drawer when an incoming
+    // file arrives, the chat panel is hidden — flag the settings
+    // button so they notice. Same behaviour as incoming text in
+    // addMessage. Without this the file message lands in the DOM
+    // but stays invisible until the user taps the chat tab.
+    if (kind === 'incoming' && els.mainView?.dataset.view === 'setup') {
+      els.btnSettings?.classList.add('has-alert');
+    }
+    console.log('[upload] rendered', kind, 'file message for', id, name,
+      'mobileView=', els.mainView?.dataset.view,
+      'parentVisible=', els.messages?.offsetHeight > 0);
     return div;
   };
   const updateFileProgress = (msgEl, sent, total) => {
@@ -2356,6 +2442,17 @@
       console.log('[upload] sent', chunkIdx, 'chunks /', file.size, 'B; broadcasting file-end');
       meshBroadcastString(JSON.stringify({ k: 'file-end', id }));
       finishFileMessage(msgEl, file, file.name);
+      completedFileIds.add(id);
+      // Persist on sender side too — so a peer who joins later can
+      // pull the file from us, not just from the original recipients.
+      const cid = currentConversationId();
+      if (cid) {
+        idbSaveFile({
+          id, roomId: cid, name: file.name, size: file.size,
+          type: file.type || 'application/octet-stream', blob: file, ts: Date.now(),
+        });
+        idbPruneRoomFiles(cid);
+      }
     } catch (err) {
       console.error('mesh file send failed', err);
       addSystem(`File transfer failed: ${file.name}`);
@@ -2404,6 +2501,15 @@
     finishFileMessage(f.msgEl, blob, f.name);
     console.log('[upload] file complete', f.id, f.name, f.size + 'B');
     completedFileIds.add(f.id);
+    // Persist so we can serve this file to peers who join later.
+    const cid = currentConversationId();
+    if (cid) {
+      idbSaveFile({
+        id: f.id, roomId: cid, name: f.name, size: f.size,
+        type: f.type || 'application/octet-stream', blob, ts: Date.now(),
+      });
+      idbPruneRoomFiles(cid);
+    }
     incomingFiles.delete(f.id);
     pendingFileChunks.delete(f.id);
   };
@@ -3711,6 +3817,65 @@
     if (!entry.dc || entry.dc.readyState !== 'open') return;
     const v = await gossipBuildHaveVector();
     try { entry.dc.send(JSON.stringify({ k: 'have', v })); } catch {}
+    // Also advertise persisted file ids in this room — lets the peer
+    // request any blob they're missing (file-have / want-file flow).
+    const cid = currentConversationId();
+    if (cid) {
+      try {
+        const files = await idbListRoomFiles(cid);
+        if (files.length) {
+          const list = files.map(r => ({
+            id: r.id, name: r.name, size: r.size, type: r.type, ts: r.ts,
+          }));
+          entry.dc.send(JSON.stringify({ k: 'file-have', list }));
+        }
+      } catch (e) { console.warn('file-have failed', e); }
+    }
+  };
+
+  // We received a peer's file-have list — request anything we don't
+  // already have (and haven't already finalized).
+  const gossipOnFileHave = async (entry, list) => {
+    if (!Array.isArray(list)) return;
+    if (!entry.dc || entry.dc.readyState !== 'open') return;
+    const cid = currentConversationId();
+    if (!cid) return;
+    for (const meta of list) {
+      if (!meta || typeof meta.id !== 'string') continue;
+      if (completedFileIds.has(meta.id)) continue;
+      if (incomingFiles.has(meta.id)) continue;
+      const local = await idbGetFile(meta.id);
+      if (local) { completedFileIds.add(meta.id); continue; }
+      try { entry.dc.send(JSON.stringify({ k: 'want-file', id: meta.id })); } catch {}
+    }
+  };
+
+  // Peer asked us for a file. Look up the blob locally and re-emit it
+  // through the same file-meta + chunk pipeline (not just to the
+  // requester — gossip will bring it to anyone else who needs it too).
+  const gossipOnWantFile = async (entry, msg) => {
+    if (!msg || typeof msg.id !== 'string') return;
+    const rec = await idbGetFile(msg.id);
+    if (!rec || !rec.blob) return;
+    const totalChunks = Math.max(1, Math.ceil(rec.size / CHUNK_SIZE));
+    const meta = { k: 'file-meta', id: rec.id, name: rec.name, size: rec.size, type: rec.type, chunks: totalChunks };
+    // Send the meta to all open peers (gossip dedups on the receivers).
+    const sent = meshBroadcastString(JSON.stringify(meta));
+    if (sent === 0) return;
+    console.log('[upload] re-serving', rec.id, rec.name, 'as', totalChunks, 'chunks (requested by', entry.peerId + ')');
+    let offset = 0, chunkIdx = 0;
+    try {
+      while (offset < rec.size) {
+        await meshWaitForDrain();
+        const slice = rec.blob.slice(offset, offset + CHUNK_SIZE);
+        const buf = await slice.arrayBuffer();
+        const packet = buildChunkPacket(rec.id, chunkIdx, buf);
+        if (meshBroadcastBinary(packet) === 0) break;
+        offset += buf.byteLength;
+        chunkIdx += 1;
+      }
+      meshBroadcastString(JSON.stringify({ k: 'file-end', id: rec.id }));
+    } catch (e) { console.warn('re-serve failed', e); }
   };
 
   // We received the peer's have-vector — request anything we're missing.
@@ -3768,6 +3933,8 @@
         case 'have':         gossipOnHave(entry, msg.v || {}); break;
         case 'want':         gossipOnWant(entry, msg); break;
         case 'batch':        gossipOnBatch(entry, msg); break;
+        case 'file-have':    gossipOnFileHave(entry, msg.list || []); break;
+        case 'want-file':    gossipOnWantFile(entry, msg); break;
         case 'txt':
           // Old-format message from a pre-gossip client — display only,
           // don't persist with gid (no signature, can't be forwarded).
@@ -3940,6 +4107,12 @@
         if (typeof m.gid === 'string') gossipSeen.add(m.gid);
       }
     } catch (e) { console.warn('gossip seed failed', e); }
+    // Seed completed-file dedup from persisted blobs so file-have
+    // exchanges don't ask peers for files we already have on disk.
+    try {
+      const files = await idbListRoomFiles(cid);
+      for (const r of files) completedFileIds.add(r.id);
+    } catch (e) { console.warn('file dedup seed failed', e); }
     loadAndRenderHistory(cid);
 
     const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
