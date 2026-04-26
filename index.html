@@ -639,6 +639,7 @@
     width: 42px; height: 42px; border-radius: 4px;
     display: flex; align-items: center; justify-content: center;
     cursor: pointer; transition: all 0.2s ease; flex-shrink: 0;
+    position: relative; overflow: hidden;
   }
   .icon-btn:hover:not(:disabled) {
     border-color: var(--dp-green); color: var(--dp-green-bright);
@@ -647,6 +648,14 @@
   .icon-btn:disabled,
   .icon-btn.is-disabled { opacity: 0.3; cursor: not-allowed; pointer-events: none; }
   .icon-btn svg { width: 18px; height: 18px; }
+  /* Nested file input fills the label and is invisible — the user is
+     actually tapping the input itself, which is the most reliable
+     way to open the file picker on iOS Safari (label "for" forwarding
+     can fail in some standalone / PWA modes). */
+  .icon-btn input[type="file"] {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    opacity: 0; cursor: inherit; font-size: 0;
+  }
 
   /* ─────────── TOAST ─────────── */
   .toast {
@@ -981,10 +990,10 @@
       </div>
 
       <div class="composer">
-        <label class="icon-btn is-disabled" id="btnAttach" for="fileInput" title="Send file" aria-label="Attach file">
+        <label class="icon-btn is-disabled" id="btnAttach" title="Send file" aria-label="Attach file">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+          <input type="file" id="fileInput" />
         </label>
-        <input type="file" id="fileInput" style="position:absolute; left:-9999px; width:1px; height:1px; opacity:0;" />
         <input type="text" id="textInput" placeholder="Channel offline — complete handshake to begin…" disabled />
         <button class="icon-btn" id="btnSend" disabled title="Send message">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
@@ -2267,18 +2276,28 @@
     const idBytes = new TextEncoder().encode(id);
     const headerLen = 1 + idBytes.length;
     let offset = 0;
-    while (offset < file.size) {
-      await meshWaitForDrain();
-      const slice = file.slice(offset, offset + CHUNK_SIZE);
-      const buf = await slice.arrayBuffer();
-      const out = new Uint8Array(headerLen + buf.byteLength);
-      out[0] = idBytes.length; out.set(idBytes, 1); out.set(new Uint8Array(buf), headerLen);
-      meshBroadcastBinary(out.buffer);
-      offset += buf.byteLength;
-      updateFileProgress(msgEl, offset, file.size);
+    try {
+      while (offset < file.size) {
+        await meshWaitForDrain();
+        const slice = file.slice(offset, offset + CHUNK_SIZE);
+        const buf = await slice.arrayBuffer();
+        const out = new Uint8Array(headerLen + buf.byteLength);
+        out[0] = idBytes.length; out.set(idBytes, 1); out.set(new Uint8Array(buf), headerLen);
+        const n = meshBroadcastBinary(out.buffer);
+        if (n === 0) {
+          // All channels closed mid-stream — surface it instead of looping forever.
+          throw new Error('all channels closed mid-transfer');
+        }
+        offset += buf.byteLength;
+        updateFileProgress(msgEl, offset, file.size);
+      }
+      meshBroadcastString(JSON.stringify({ k: 'file-end', id }));
+      finishFileMessage(msgEl, file, file.name);
+    } catch (err) {
+      console.error('mesh file send failed', err);
+      addSystem(`File transfer failed: ${file.name}`);
+      toast('File send failed — peer disconnected?', true);
     }
-    meshBroadcastString(JSON.stringify({ k: 'file-end', id }));
-    finishFileMessage(msgEl, file, file.name);
   };
 
   const sendFile = async (file) => {
