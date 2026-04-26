@@ -2260,8 +2260,11 @@
     // mix history from two rooms / peers.
     historyLoadedFor = cid;
     els.messages.innerHTML = '';
-    const msgs = await idbGetRoomMessages(cid, MESSAGES_PER_ROOM_CAP);
-    if (!msgs.length) return;
+    const [msgs, files] = await Promise.all([
+      idbGetRoomMessages(cid, MESSAGES_PER_ROOM_CAP),
+      idbListRoomFiles(cid),
+    ]);
+    if (!msgs.length && !files.length) return;
     els.emptyState?.remove();
     msgs.sort((a, b) => (a.ts || 0) - (b.ts || 0) || (a.id || 0) - (b.id || 0));
     for (const m of msgs) {
@@ -2273,9 +2276,33 @@
         `<div class="msg-meta">${fmtTime(new Date(m.ts || Date.now()))}</div>`;
       insertMsgByTs(div, m.ts || 0);
     }
+    // Rehydrate persisted files. Each row holds the blob + metadata,
+    // so we can render the bubble and immediately attach a download
+    // link via finishFileMessage. insertMsgByTs slots them into the
+    // right chronological position alongside the text messages.
+    for (const f of files) {
+      const kind = f.kind || 'incoming';
+      const senderLabel = f.sender || (kind === 'outgoing' ? (myNickname || 'You') : 'Peer');
+      const div = addFileMessage(kind, f.name, f.size, f.id, senderLabel);
+      // addFileMessage uses Date.now() for positioning; reposition by
+      // the file's actual ts so historical files stay in order.
+      div.dataset.ts = String(f.ts || 0);
+      // Move into correct position among existing children.
+      const list = els.messages;
+      let placed = false;
+      for (let i = list.children.length - 2; i >= 0; i--) {
+        const c = list.children[i];
+        if (Number(c.dataset.ts || 0) <= (f.ts || 0)) {
+          c.after(div); placed = true; break;
+        }
+      }
+      if (!placed) list.prepend(div);
+      if (f.blob) finishFileMessage(div, f.blob, f.name);
+    }
+    const total = msgs.length + files.length;
     const divider = document.createElement('div');
     divider.className = 'msg system';
-    divider.textContent = `— ${msgs.length} message${msgs.length > 1 ? 's' : ''} restored from this room —`;
+    divider.textContent = `— ${total} item${total > 1 ? 's' : ''} restored from this room —`;
     insertMsgByTs(divider, Date.now());
   };
 
@@ -2444,12 +2471,14 @@
       finishFileMessage(msgEl, file, file.name);
       completedFileIds.add(id);
       // Persist on sender side too — so a peer who joins later can
-      // pull the file from us, not just from the original recipients.
+      // pull the file from us, AND so the message rehydrates after
+      // a reload via loadAndRenderHistory.
       const cid = currentConversationId();
       if (cid) {
         idbSaveFile({
           id, roomId: cid, name: file.name, size: file.size,
           type: file.type || 'application/octet-stream', blob: file, ts: Date.now(),
+          kind: 'outgoing', sender: myNickname || 'You',
         });
         idbPruneRoomFiles(cid);
       }
@@ -2501,12 +2530,16 @@
     finishFileMessage(f.msgEl, blob, f.name);
     console.log('[upload] file complete', f.id, f.name, f.size + 'B');
     completedFileIds.add(f.id);
-    // Persist so we can serve this file to peers who join later.
+    // Persist so we can serve this file to peers who join later AND
+    // render it back into the chat after a reload (loadAndRenderHistory
+    // pulls files from STORE_FILES). kind/sender are saved so the
+    // rehydrated message looks identical to the live one.
     const cid = currentConversationId();
     if (cid) {
       idbSaveFile({
         id: f.id, roomId: cid, name: f.name, size: f.size,
         type: f.type || 'application/octet-stream', blob, ts: Date.now(),
+        kind: 'incoming', sender: f.msgEl?.querySelector('.msg-sender')?.textContent || 'Peer',
       });
       idbPruneRoomFiles(cid);
     }
