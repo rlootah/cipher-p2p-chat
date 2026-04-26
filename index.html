@@ -2264,14 +2264,22 @@
   /* ── File transfer ────────────────────────────────────────── */
   const CHUNK_SIZE = 16 * 1024;
   const sendFileMesh = async (file) => {
-    if (meshConnectedCount() === 0) {
+    const open = meshConnectedCount();
+    console.log('[upload] mesh path; open peer channels:', open);
+    if (open === 0) {
+      addSystem(`Cannot send "${file.name}": no peers connected`);
       toast('No peer connected — cannot send file', true);
       return;
     }
     const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
     const meta = JSON.stringify({ k: 'file-meta', id, name: file.name, size: file.size, type: file.type });
     const sent = meshBroadcastString(meta);
-    if (sent === 0) { toast('No open channels — file send aborted', true); return; }
+    console.log('[upload] file-meta sent to', sent, 'peers');
+    if (sent === 0) {
+      addSystem(`Cannot send "${file.name}": no open channels`);
+      toast('No open channels — file send aborted', true);
+      return;
+    }
     const msgEl = addFileMessage('outgoing', file.name, file.size, id);
     const idBytes = new TextEncoder().encode(id);
     const headerLen = 1 + idBytes.length;
@@ -2302,7 +2310,9 @@
 
   const sendFile = async (file) => {
     if (meshInAnyRoom()) return sendFileMesh(file);
+    console.log('[upload] legacy 1:1 path; dc state:', dc && dc.readyState);
     if (!dc || dc.readyState !== 'open') {
+      addSystem(`Cannot send "${file.name}": channel not open`);
       toast('Channel not open — cannot send file', true);
       return;
     }
@@ -4199,10 +4209,27 @@
   // the picker natively when tapped. No JS click bridge needed (and on
   // iOS Safari, a JS-driven .click() on a hidden file input is unreliable).
   els.fileInput.addEventListener('change', async (e) => {
-    const file = e.target.files[0]; if (!file) return;
-    if (file.size > 1024 * 1024 * 1024) return toast('Files over 1 GB not supported', true);
-    await sendFile(file);
+    const file = e.target.files[0];
+    // Reset the input early so picking the same file twice still
+    // fires `change`, and so a half-finished send doesn't leave the
+    // picker locked to the prior selection.
     els.fileInput.value = '';
+    if (!file) {
+      console.warn('[upload] change fired but no file selected');
+      return;
+    }
+    console.log('[upload] selected', file.name, file.size, file.type);
+    if (file.size > 1024 * 1024 * 1024) {
+      addSystem(`File too large: ${file.name} (max 1 GB)`);
+      return toast('Files over 1 GB not supported', true);
+    }
+    try {
+      await sendFile(file);
+    } catch (err) {
+      console.error('[upload] sendFile threw', err);
+      addSystem(`File send failed: ${file.name}`);
+      toast('File send failed — see console', true);
+    }
   });
 
   /* ── Role buttons ─────────────────────────────────────────── */
