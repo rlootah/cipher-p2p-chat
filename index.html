@@ -579,27 +579,24 @@
   .msg.outgoing .msg-sender { color: var(--dp-green-bright); text-align: right; }
   .msg.incoming .msg-sender { color: var(--dp-green-bright); }
   .msg.file {
-    /* `padding: 0` + a min-height ensures the bubble is always visible
-       even when the children's flex layout was computed while the
-       parent .messages was display:none (for example during initial
-       render on the mobile setup view). Without min-height some
-       browsers cached the file div as h=0px and never recomputed the
-       layout when the chat panel was revealed. The `display: block`
-       is explicit so a stray `display: none` from any ancestor rule
-       can't accidentally apply to the bubble itself.
-       Children that need clipping (file-name with text-overflow) set
-       overflow: hidden themselves; we don't need it here. */
+    /* Cap file bubbles narrower than text bubbles — they should look
+       like compact cards, not stretched panels across most of the
+       chat. min-height + display:block keep the bubble visible even
+       if children's flex layout was computed while .messages was
+       display:none (mobile setup-drawer initial render). */
     padding: 0;
     display: block;
     min-height: 64px;
+    width: fit-content;
+    max-width: min(70%, 380px);
   }
   .msg.file .file-card {
-    padding: 12px 14px; display: flex; align-items: center; gap: 12px;
+    padding: 10px 12px; display: flex; align-items: center; gap: 10px;
   }
   .msg.file .file-icon {
-    width: 36px; height: 36px; border: 1px solid currentColor; border-radius: 4px;
+    width: 32px; height: 32px; border: 1px solid currentColor; border-radius: 4px;
     display: flex; align-items: center; justify-content: center;
-    font-family: var(--display); font-size: 18px; opacity: 0.7; flex-shrink: 0;
+    font-family: var(--display); font-size: 14px; opacity: 0.7; flex-shrink: 0;
   }
   .msg.file .file-info { flex: 1; min-width: 0; }
   .msg.file .file-name {
@@ -617,8 +614,8 @@
   }
   .msg.file .file-download {
     color: inherit; text-decoration: none; font-family: var(--mono);
-    font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
-    border: 1px solid currentColor; padding: 5px 10px; border-radius: 3px;
+    font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+    border: 1px solid currentColor; padding: 4px 8px; border-radius: 3px;
     transition: all 0.2s ease; flex-shrink: 0;
   }
   .msg.file .file-download:hover {
@@ -2349,7 +2346,7 @@
     else if (kind === 'outgoing') sender = myNickname || 'You';
     else sender = peerDisplayName() || 'Peer';
     div.innerHTML = `
-      <span class="msg-sender" style="padding:10px 14px 0;">${escapeHtml(sender)}</span>
+      <span class="msg-sender" style="padding:8px 12px 0;">${escapeHtml(sender)}</span>
       <div class="file-card">
         <div class="file-icon">${name.split('.').pop().slice(0,3).toUpperCase() || 'FIL'}</div>
         <div class="file-info">
@@ -2358,7 +2355,7 @@
           <div class="file-progress"><div class="file-progress-bar"></div></div>
         </div>
       </div>
-      <div class="msg-meta" style="padding:0 14px 8px;">${fmtTime(new Date())}</div>
+      <div class="msg-meta" style="padding:0 12px 6px;">${fmtTime(new Date())}</div>
     `;
     insertMsgByTs(div, Date.now());
     // On mobile, if the user is on the Setup drawer when an incoming
