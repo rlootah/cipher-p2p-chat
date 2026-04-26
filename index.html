@@ -2353,6 +2353,7 @@
         chunkIdx += 1;
         updateFileProgress(msgEl, offset, file.size);
       }
+      console.log('[upload] sent', chunkIdx, 'chunks /', file.size, 'B; broadcasting file-end');
       meshBroadcastString(JSON.stringify({ k: 'file-end', id }));
       finishFileMessage(msgEl, file, file.name);
     } catch (err) {
@@ -2445,6 +2446,11 @@
     // Skip outright if we already finalized this file via gossip.
     if (completedFileIds.has(id)) return;
     let f = incomingFiles.get(id);
+    if (chunkIdx === 0) {
+      // Log the very first chunk so the receiver console proves
+      // chunks are arriving (not just file-meta).
+      console.log('[upload] received first chunk for', id, 'have meta?', !!f);
+    }
     if (!f) {
       // Chunk arrived before its meta — buffer until we know totalChunks
       // and have a place to render progress. Still forward immediately
