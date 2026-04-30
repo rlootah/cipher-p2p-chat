@@ -2454,9 +2454,13 @@
     }
     const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
     const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+    const origin = {
+      sfp: myIdentity?.fingerprint || null,
+      name: myNickname || 'You',
+    };
     const meta = JSON.stringify({
       k: 'file-meta', id, name: file.name, size: file.size,
-      type: file.type, chunks: totalChunks,
+      type: file.type, chunks: totalChunks, origin,
     });
     const sent = meshBroadcastString(meta);
     console.log('[upload] file-meta sent to', sent, 'peers');
@@ -2492,6 +2496,7 @@
           id, roomId: cid, name: file.name, size: file.size,
           type: file.type || 'application/octet-stream', blob: file, ts: Date.now(),
           kind: 'outgoing', sender: myNickname || 'You',
+          originSfp: origin.sfp, originName: origin.name,
         });
         idbPruneRoomFiles(cid);
       }
@@ -2511,7 +2516,10 @@
       return;
     }
     const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
-    dc.send(JSON.stringify({ k: 'file-meta', id, name: file.name, size: file.size, type: file.type }));
+    dc.send(JSON.stringify({
+      k: 'file-meta', id, name: file.name, size: file.size, type: file.type,
+      origin: { sfp: myIdentity?.fingerprint || null, name: myNickname || 'You' },
+    }));
     const msgEl = addFileMessage('outgoing', file.name, file.size, id);
     const idBytes = new TextEncoder().encode(id);
     const headerLen = 1 + idBytes.length;
@@ -2552,7 +2560,10 @@
       idbSaveFile({
         id: f.id, roomId: cid, name: f.name, size: f.size,
         type: f.type || 'application/octet-stream', blob, ts: Date.now(),
-        kind: 'incoming', sender: f.msgEl?.querySelector('.msg-sender')?.textContent || 'Peer',
+        kind: 'incoming',
+        sender: f.senderLabel || f.msgEl?.querySelector('.msg-sender')?.textContent || 'Peer',
+        originSfp: f.originSfp || null,
+        originName: f.originName || null,
       });
       idbPruneRoomFiles(cid);
     }
@@ -2562,16 +2573,25 @@
 
   // file-meta: dedup by id, register the incoming file, drain any
   // chunks that arrived ahead of the meta, then forward to other peers.
-  const onFileMeta = (msg, senderName, fromPeerId) => {
+  // `forwarderName` is the peer who handed us this meta (used only as a
+  // last-resort label if the meta has no origin info — i.e. legacy peer).
+  const onFileMeta = (msg, forwarderName, fromPeerId) => {
     // Dedup against in-flight AND completed files — gossip will deliver
     // the same meta from multiple paths and we must NOT re-finalize.
     if (incomingFiles.has(msg.id) || completedFileIds.has(msg.id)) return;
     console.log('[upload] received file-meta', msg.id, msg.name, 'from', fromPeerId);
     const totalChunks = msg.chunks || Math.max(1, Math.ceil(msg.size / CHUNK_SIZE));
-    const msgEl = addFileMessage('incoming', msg.name, msg.size, msg.id, senderName);
+    const originSfp = msg.origin?.sfp || null;
+    const originName = msg.origin?.name || null;
+    let senderLabel;
+    if (originSfp) senderLabel = resolveSenderName(originSfp, originName);
+    else if (originName) senderLabel = originName;
+    else senderLabel = forwarderName || 'Peer';
+    const msgEl = addFileMessage('incoming', msg.name, msg.size, msg.id, senderLabel);
     const f = {
       id: msg.id, name: msg.name, size: msg.size, type: msg.type,
       totalChunks, chunks: new Array(totalChunks), haveCount: 0, bytes: 0, msgEl,
+      originSfp, originName, senderLabel,
     };
     incomingFiles.set(msg.id, f);
     // Pull in any chunks that already arrived for this id.
@@ -3168,12 +3188,14 @@
   let gossipSeen = null;       // Set<gid> — for dedup
   let gossipMySeq = 0;         // my outgoing counter (room-scoped)
   let gossipPubKeys = null;    // Map<sfp, CryptoKey> — verified pubkeys cache
+  let gossipNicknames = null;  // Map<sfp, string> — last-seen self-declared nick from envelopes
   const GOSSIP_BATCH_MAX = 50; // cap entries per batch reply
 
   const gossipResetState = () => {
     gossipSeen = new Set();
     gossipMySeq = 0;
     gossipPubKeys = new Map();
+    gossipNicknames = new Map();
     // Drop any half-received files — their chunks won't be valid in
     // a different room context and the dedup table needs to be fresh.
     if (typeof incomingFiles !== 'undefined') incomingFiles.clear();
@@ -3211,6 +3233,7 @@
       ts: Date.now(),
       body,
       pk: myIdentity.publicJwk,
+      n: myNickname || '',
     };
     env.gid = env.sfp + ':' + env.seq;
     const sig = await crypto.subtle.sign(
@@ -3347,6 +3370,30 @@
       return entry.identityFp.slice(0, 11);
     }
     return 'peer';
+  };
+
+  // Resolve the *originator* of a gossiped/forwarded item by their identity
+  // fingerprint, NOT by which peer relayed it to us. Priority:
+  //   1. self
+  //   2. a directly-connected peer with that identity who has a nickname
+  //   3. a trusted peer record
+  //   4. nickname carried in the envelope itself (signed by the originator)
+  //   5. last-seen envelope nickname for this sfp (from earlier traffic)
+  //   6. a hex-fingerprint slice — only if nothing else is known
+  const resolveSenderName = (sfp, envNick) => {
+    if (!sfp) return 'peer';
+    if (myIdentity && sfp === myIdentity.fingerprint) return myNickname || 'You';
+    for (const [, e] of meshPeers) {
+      if (e.identityFp === sfp && e.nickname) return e.nickname;
+    }
+    const trusted = trustedPeers.get(sfp);
+    if (trusted?.nickname) return trusted.nickname;
+    if (envNick) return envNick;
+    if (gossipNicknames) {
+      const cached = gossipNicknames.get(sfp);
+      if (cached) return cached;
+    }
+    return sfp.slice(0, 8);
   };
   const firstOpenMeshPeer = () => {
     for (const [, e] of meshPeers) if (e.dc && e.dc.readyState === 'open') return e;
@@ -3835,17 +3882,11 @@
     if (gossipSeen.has(env.gid)) return;
     if (!(await gossipVerify(env))) return;
     gossipSeen.add(env.gid);
+    if (typeof env.n === 'string' && env.n) {
+      gossipNicknames.set(env.sfp, env.n);
+    }
     if (env.t === 'txt') {
-      // Prefer the verified identity fingerprint to label the sender.
-      // Fall back to nickname from a known peer entry, then a short hash.
-      let label = null;
-      for (const [, e] of meshPeers) {
-        if (e.identityFp === env.sfp) { label = meshPeerDisplayName(e); break; }
-      }
-      if (!label && myIdentity && env.sfp === myIdentity.fingerprint) {
-        label = myNickname || 'You';
-      }
-      if (!label) label = env.sfp.slice(0, 8);
+      const label = resolveSenderName(env.sfp, env.n);
       const kind = (myIdentity && env.sfp === myIdentity.fingerprint) ? 'outgoing' : 'incoming';
       addMessage(kind, String(env.body || ''), label, {
         gid: env.gid, sfp: env.sfp, seq: env.seq, ts: env.ts,
@@ -3904,7 +3945,25 @@
     const rec = await idbGetFile(msg.id);
     if (!rec || !rec.blob) return;
     const totalChunks = Math.max(1, Math.ceil(rec.size / CHUNK_SIZE));
-    const meta = { k: 'file-meta', id: rec.id, name: rec.name, size: rec.size, type: rec.type, chunks: totalChunks };
+    // Preserve the original uploader's identity. If we authored this file,
+    // stamp our current identity; if we received it, replay whatever origin
+    // was persisted with the blob so re-serving never reattributes to us.
+    let origin;
+    if (rec.kind === 'outgoing') {
+      origin = {
+        sfp: rec.originSfp || myIdentity?.fingerprint || null,
+        name: rec.originName || rec.sender || myNickname || 'You',
+      };
+    } else {
+      origin = {
+        sfp: rec.originSfp || null,
+        name: rec.originName || rec.sender || null,
+      };
+    }
+    const meta = {
+      k: 'file-meta', id: rec.id, name: rec.name, size: rec.size,
+      type: rec.type, chunks: totalChunks, origin,
+    };
     // Send the meta to all open peers (gossip dedups on the receivers).
     const sent = meshBroadcastString(JSON.stringify(meta));
     if (sent === 0) return;
