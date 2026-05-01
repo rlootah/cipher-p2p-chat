@@ -812,6 +812,10 @@
         <button class="call-btn mute" id="btnMute" title="Mute" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
         </button>
+        <button class="call-btn audio-out" id="btnAudioOut" title="Switch to earpiece volume" data-mode="speaker">
+          <svg class="ico-speaker" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+          <svg class="ico-earpiece" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+        </button>
         <button class="call-btn start" id="btnCall" title="Start voice call">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
         </button>
@@ -1062,6 +1066,7 @@
     callLevel:     $('callLevel'),
     btnCall:       $('btnCall'),
     btnMute:       $('btnMute'),
+    btnAudioOut:   $('btnAudioOut'),
     callBanner:    $('callBanner'),
     btnAcceptCall: $('btnAcceptCall'),
     btnDeclineCall:$('btnDeclineCall'),
@@ -2097,8 +2102,9 @@
       els.remoteAudio.srcObject = stream;
       // Note: track arrives even before an "intent to call" — we suppress
       // playback by leaving the remote track muted until call is accepted.
-      // The simplest enforcement: set audio element volume.
-      els.remoteAudio.volume = 1.0;
+      // The simplest enforcement: set audio element volume via the
+      // current speaker/earpiece mode.
+      applyAudioOutputToEl(els.remoteAudio);
     };
 
     // VOICE: pre-create an audio transceiver in BOTH directions.
@@ -3540,10 +3546,79 @@
     }
   };
 
+  // ── Audio output routing ────────────────────────────────────
+  // Web platforms don't expose the earpiece as a selectable output on
+  // mobile, so "earpiece mode" is best-effort: try setSinkId() to a
+  // communications/voice device when the browser exposes one (some
+  // Android Chrome builds do), and always drop volume to ~0.4 so the
+  // phone isn't blasting media-volume audio through the loud speaker.
+  // Speaker mode = full volume + default sink.
+  let audioOutputMode = 'speaker';
+  try {
+    const saved = localStorage.getItem('audioOutputMode');
+    if (saved === 'earpiece' || saved === 'speaker') audioOutputMode = saved;
+  } catch {}
+
+  const pickEarpieceSinkId = async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return null;
+    try {
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      const outs = devs.filter(d => d.kind === 'audiooutput');
+      // Prefer an explicit "communications" device if the browser exposes one.
+      const comms = outs.find(d => d.deviceId === 'communications');
+      if (comms) return comms.deviceId;
+      // Fall back to any non-default output that mentions earpiece/receiver.
+      const named = outs.find(d => /earpiece|receiver|handset/i.test(d.label));
+      if (named) return named.deviceId;
+      return null;
+    } catch { return null; }
+  };
+
+  const applyAudioOutputToEl = async (el) => {
+    if (!el) return;
+    el.volume = (audioOutputMode === 'earpiece') ? 0.4 : 1.0;
+    if (audioOutputMode === 'earpiece' && typeof el.setSinkId === 'function') {
+      const sinkId = await pickEarpieceSinkId();
+      if (sinkId) {
+        try { await el.setSinkId(sinkId); } catch {}
+      }
+    } else if (typeof el.setSinkId === 'function') {
+      try { await el.setSinkId(''); } catch {}
+    }
+  };
+
+  const applyAudioOutputMode = () => {
+    for (const [, e] of meshPeers) applyAudioOutputToEl(e.audioEl);
+    if (els.remoteAudio) applyAudioOutputToEl(els.remoteAudio);
+    if (els.btnAudioOut) {
+      els.btnAudioOut.dataset.mode = audioOutputMode;
+      els.btnAudioOut.title = audioOutputMode === 'speaker'
+        ? 'Switch to earpiece (quieter — hold phone to ear)'
+        : 'Switch to speaker';
+      const icoSpk = els.btnAudioOut.querySelector('.ico-speaker');
+      const icoEar = els.btnAudioOut.querySelector('.ico-earpiece');
+      if (icoSpk && icoEar) {
+        icoSpk.style.display = audioOutputMode === 'speaker' ? '' : 'none';
+        icoEar.style.display = audioOutputMode === 'earpiece' ? '' : 'none';
+      }
+    }
+  };
+
+  if (els.btnAudioOut) {
+    els.btnAudioOut.addEventListener('click', () => {
+      audioOutputMode = (audioOutputMode === 'speaker') ? 'earpiece' : 'speaker';
+      try { localStorage.setItem('audioOutputMode', audioOutputMode); } catch {}
+      applyAudioOutputMode();
+    });
+  }
+  // Apply once on boot so the button reflects the persisted mode.
+  applyAudioOutputMode();
+
   const meshSetReceivingAudio = (on) => {
     for (const [, e] of meshPeers) {
       if (e.audioEl) {
         e.audioEl.muted = !on;
+        applyAudioOutputToEl(e.audioEl);
         if (on) { try { e.audioEl.play().catch(()=>{}); } catch {} }
       }
     }
@@ -3712,6 +3787,7 @@
       }
       entry.audioEl.srcObject = stream;
       entry.audioEl.muted = !inCall;
+      applyAudioOutputToEl(entry.audioEl);
     };
 
     return conn;
