@@ -15,6 +15,7 @@ const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 8080;
 const INDEX_PATH = path.join(__dirname, 'index.html');
+const APK_PATH = path.join(__dirname, 'cipher.apk');
 
 const server = http.createServer((req, res) => {
   if (req.url === '/healthz') {
@@ -24,6 +25,23 @@ const server = http.createServer((req, res) => {
   }
   if (req.method !== 'GET') {
     res.writeHead(405); res.end();
+    return;
+  }
+  if (req.url === '/cipher.apk' || req.url === '/app') {
+    fs.readFile(APK_PATH, (err, data) => {
+      if (err) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('APK not available');
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.android.package-archive',
+        'Content-Disposition': 'attachment; filename="Cipher.apk"',
+        'Content-Length': data.length,
+        'Cache-Control': 'no-cache',
+      });
+      res.end(data);
+    });
     return;
   }
   if (req.url === '/' || req.url === '/index.html' || req.url.startsWith('/#')) {
