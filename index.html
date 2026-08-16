@@ -2232,6 +2232,20 @@
     list.prepend(div);
   };
 
+  // Android wrapper bridge: when the page runs inside the Cipher APK,
+  // window.CipherNative exists and can raise OS notifications while the
+  // app is backgrounded. No-op in normal browsers.
+  const notifyNative = (sender, body) => {
+    try {
+      if (window.CipherNative) window.CipherNative.onMessage(String(sender || 'Peer'), String(body || ''));
+    } catch {}
+  };
+  const notifyNativeCall = (sender) => {
+    try {
+      if (window.CipherNative) window.CipherNative.onCallInvite(String(sender || 'Peer'));
+    } catch {}
+  };
+
   const addMessage = (kind, text, senderOverride, gossipMeta) => {
     els.emptyState?.remove();
     const div = document.createElement('div');
@@ -2264,6 +2278,7 @@
     if (kind === 'incoming' && els.mainView && els.mainView.dataset.view === 'setup') {
       els.btnSettings?.classList.add('has-alert');
     }
+    if (kind === 'incoming') notifyNative(sender, text);
   };
 
   let historyLoadedFor = null; // conversation id we've already rendered
@@ -2569,6 +2584,7 @@
     console.log('[upload] received file-meta', msg.id, msg.name, 'from', fromPeerId);
     const totalChunks = msg.chunks || Math.max(1, Math.ceil(msg.size / CHUNK_SIZE));
     const msgEl = addFileMessage('incoming', msg.name, msg.size, msg.id, senderName);
+    notifyNative(senderName || 'Peer', '📎 ' + (msg.name || 'file'));
     const f = {
       id: msg.id, name: msg.name, size: msg.size, type: msg.type,
       totalChunks, chunks: new Array(totalChunks), haveCount: 0, bytes: 0, msgEl,
@@ -2737,6 +2753,7 @@
     }
     els.callBanner.classList.add('show');
     addCallEvent('Incoming call');
+    notifyNativeCall(peerDisplayName() || 'Peer');
     // Soft chime via Web Audio (no external assets)
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -3551,6 +3568,7 @@
     // and auto-switch the mobile view to Chat where the banner is visible.
     toast(`${inviter} is calling — Accept or Decline above`);
     if (els.btnSettings) els.btnSettings.classList.add('has-alert');
+    notifyNativeCall(inviter);
     setMobileView('chat');
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
