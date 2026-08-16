@@ -30,7 +30,6 @@ public class MainActivity extends Activity {
     private WebView webView;
     private PermissionRequest pendingWebPermissionRequest;
     private ValueCallback<Uri[]> filePathCallback;
-    private boolean loadedOnce = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -46,9 +45,31 @@ public class MainActivity extends Activity {
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                // A reload wipes the JS state that owns the call, so it can
+                // never send setCallAudio(false). Without this the phone
+                // stays in communication mode with the proximity sensor
+                // blanking the screen indefinitely.
+                CipherApp.get().resetCallAudio();
+            }
+
+            @Override
+            public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                // The render process died; the WebView object is unusable.
+                // Release audio/proximity and rebuild on next launch.
+                CipherApp.get().resetCallAudio();
+                CipherApp.get().discardWebView();
+                finish();
+                return true; // handled — do not let the process be killed
+            }
+
+            @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri url = request.getUrl();
-                if (url.getHost() != null && CipherApp.APP_URL.contains(url.getHost())) return false;
+                // Exact host match only. A substring test (APP_URL.contains(host))
+                // also accepted "railway.app" and "up.railway.app", handing the
+                // native CipherBlob/CipherNative bridges to any page hosted there.
+                if (CipherApp.isTrustedUrl(url)) return false;
                 try { startActivity(new Intent(Intent.ACTION_VIEW, url)); } catch (Exception ignored) {}
                 return true;
             }
@@ -111,9 +132,12 @@ public class MainActivity extends Activity {
 
         requestNeededPermissions();
 
-        if (!loadedOnce || webView.getUrl() == null) {
+        // Only load when the shared WebView has no page yet. The flag used
+        // to live on the Activity, so every relaunch (back-press then
+        // tapping a notification) reloaded the app and destroyed the room,
+        // mesh and any in-progress call that the service had kept alive.
+        if (webView.getUrl() == null) {
             webView.loadUrl(CipherApp.APP_URL);
-            loadedOnce = true;
         }
 
         // Keep the process (and the mesh) alive while backgrounded.

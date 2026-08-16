@@ -34,6 +34,16 @@ import java.io.OutputStream;
 public class CipherApp extends Application {
 
     public static final String APP_URL = "https://cipher-p2p-chat-production.up.railway.app/";
+    /** The one host allowed to run inside the WebView (and reach the JS bridges). */
+    public static final String APP_HOST = "cipher-p2p-chat-production.up.railway.app";
+
+    /** Exact-host + https check for anything we keep inside the WebView. */
+    public static boolean isTrustedUrl(android.net.Uri url) {
+        if (url == null) return false;
+        String host = url.getHost();
+        String scheme = url.getScheme();
+        return APP_HOST.equalsIgnoreCase(host) && "https".equalsIgnoreCase(scheme);
+    }
     public static final String CH_SERVICE = "cipher_service";
     public static final String CH_MESSAGES = "cipher_messages";
 
@@ -82,6 +92,32 @@ public class CipherApp extends Application {
         wv.resumeTimers();
         webView = wv;
         return wv;
+    }
+
+    /** True when a page is actually loaded and running. */
+    public boolean hasLiveWebView() {
+        return webView != null && webView.getUrl() != null;
+    }
+
+    /** Force audio routing and the proximity lock back to their idle state. */
+    public void resetCallAudio() {
+        applyCallAudio(false, false);
+    }
+
+    /** Drop a dead WebView so the next launch builds a fresh one. */
+    public void discardWebView() {
+        main.post(new Runnable() {
+            @Override public void run() {
+                if (webView == null) return;
+                try {
+                    if (webView.getParent() instanceof android.view.ViewGroup) {
+                        ((android.view.ViewGroup) webView.getParent()).removeView(webView);
+                    }
+                    webView.destroy();
+                } catch (Exception ignored) {}
+                webView = null;
+            }
+        });
     }
 
     public void toast(final String text) {

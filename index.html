@@ -295,6 +295,20 @@
   .room-panel .room-status.active { color: var(--dp-green-bright); }
   .room-panel .room-status.error { color: var(--danger); }
 
+  /* Manual handshake is the advanced path — keep it available but out of
+     the way so it stops competing with the passcode flow. */
+  .manual-handshake { margin-top: 4px; }
+  .manual-handshake > summary {
+    cursor: pointer; list-style: none;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--text-dim);
+    padding: 10px 0; user-select: none;
+  }
+  .manual-handshake > summary::-webkit-details-marker { display: none; }
+  .manual-handshake > summary::before { content: '▸ '; }
+  .manual-handshake[open] > summary::before { content: '▾ '; }
+  .manual-handshake > summary:hover { color: var(--dp-green-bright); }
+
   /* Recent peers card — quick reconnect */
   .recent-peers {
     background: linear-gradient(135deg, rgba(0,135,85,0.12), rgba(38,208,124,0.04));
@@ -856,10 +870,10 @@
   <main id="mainView" data-view="chat">
 
     <aside class="handshake">
-      <h1 class="panel-title">Manual Handshake</h1>
+      <h1 class="panel-title">Connect</h1>
       <p class="panel-subtitle">
-        Establish a direct peer-to-peer channel without any signaling server.
-        Exchange the codes below by any private medium of your choice.
+        Share a passcode to join the same room, or use the manual handshake
+        below to pair without any signaling server at all.
       </p>
 
       <!-- Recent peers (quick reconnect) -->
@@ -924,6 +938,10 @@
         <div class="room-status" id="roomStatus"></div>
       </div>
 
+      <!-- Manual (serverless) handshake. Collapsed while a passcode room
+           is active so the two connection methods stop competing. -->
+      <details class="manual-handshake" id="manualHandshake">
+        <summary>Manual handshake (no relay)</summary>
       <div class="role-toggle" role="tablist">
         <button id="roleHost" class="active" data-role="host">Host</button>
         <button id="roleJoiner" data-role="joiner">Joiner</button>
@@ -985,6 +1003,8 @@
           <div class="hint">Return the code or the link to the host. The channel will open automatically.</div>
         </div>
       </div>
+
+      </details>
 
       <div class="btn-row" style="margin-top:24px;">
         <button class="btn" id="btnReset">Reset Session</button>
@@ -1166,6 +1186,7 @@
   let qualityTimer = null;
   let lastPeerActivity = Date.now();
   let iceRestartInProgress = false;
+  let iceRestartTimer = null;
 
   // STUN alone fails for many mobile carrier networks (symmetric NAT,
   // CGNAT) — peers join the relay's room successfully but their
@@ -1239,9 +1260,25 @@
     const pad = n => String(n).padStart(2, '0');
     return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   };
-  const escapeHtml = s => s.replace(/[&<>"']/g, c =>
+  const escapeHtml = s => String(s ?? '').replace(/[&<>"']/g, c =>
     ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c])
   );
+
+  // Peer-supplied display names arrive inside signed handshakes. The
+  // signature authenticates the sender, not the content, so strip
+  // angle brackets, quotes and control/bidi characters and cap the
+  // length before the value is stored or rendered anywhere.
+  const NICK_MAX = 40;
+  const sanitizeNickname = (raw) => {
+    if (typeof raw !== 'string') return null;
+    const clean = raw
+      .replace(/[<>"'&]/g, '')
+      // C0/C1 controls plus the bidi-override range used for spoofing
+      .replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+      .trim()
+      .slice(0, NICK_MAX);
+    return clean || null;
+  };
 
   /* ── Compress / decompress SDP ────────────────────────────── */
   const compressToBase64 = async (str) => {
@@ -1354,13 +1391,17 @@
         const cursor = idx.openCursor(IDBKeyRange.only(roomId));
         cursor.onsuccess = (e) => {
           const c = e.target.result;
-          if (c) { out.push(c.value.id); c.continue(); }
+          if (c) { out.push({ id: c.value.id, ts: c.value.ts || 0 }); c.continue(); }
           else res(out);
         };
         cursor.onerror = () => rej(cursor.error);
       });
       if (all.length <= keep) return;
-      const toDelete = all.slice(0, all.length - keep);
+      // Evict by message time, not insertion order. Gossip back-fills old
+      // messages late, so insertion order would delete recent live messages
+      // while keeping the just-recovered ancient ones.
+      all.sort((a, b) => a.ts - b.ts || a.id - b.id);
+      const toDelete = all.slice(0, all.length - keep).map(r => r.id);
       await new Promise((res, rej) => {
         const tx = db.transaction(STORE_MESSAGES, 'readwrite');
         const s = tx.objectStore(STORE_MESSAGES);
@@ -1650,7 +1691,7 @@
       const row = document.createElement('div');
       row.className = 'recent-peer-row';
       row.innerHTML = `
-        <div class="recent-peer-avatar">${initial}</div>
+        <div class="recent-peer-avatar">${escapeHtml(initial)}</div>
         <div class="recent-peer-info">
           <div class="recent-peer-name">${escapeHtml(name)}</div>
           <div class="recent-peer-meta">${peer.fingerprint.slice(0, 14)} · ${fmtRelative(peer.lastSeen)}</div>
@@ -1883,7 +1924,10 @@
     return {
       sdpCode: payload.sdp,
       peerFp: payload.idFp,
-      peerNick: payload.nick || null,
+      // A valid signature proves which identity chose this nickname — not
+      // that the string is safe or sane. Strip markup/control characters
+      // and cap the length before it reaches any UI sink.
+      peerNick: sanitizeNickname(payload.nick),
       isTrusted: trustedPeers.has(payload.idFp),
     };
   };
@@ -1943,6 +1987,17 @@
     if (role !== 'host') return; // Only host initiates ICE restart
 
     iceRestartInProgress = true;
+    // The flag is normally cleared when the answer arrives. If the peer
+    // never answers — the common case, since the channel being dead is
+    // *why* we're restarting — it would latch on and disable ICE restart
+    // for the rest of the session. Always release it on a timeout.
+    if (iceRestartTimer) clearTimeout(iceRestartTimer);
+    iceRestartTimer = setTimeout(() => {
+      if (iceRestartInProgress) {
+        console.warn('ICE restart timed out — releasing lock');
+        iceRestartInProgress = false;
+      }
+    }, 15000);
     addSystem('Network change detected — refreshing connection');
     try {
       const offer = await pc.createOffer({ iceRestart: true });
@@ -1977,6 +2032,7 @@
   };
 
   const handleIceRestartAnswer = async (msg) => {
+    if (iceRestartTimer) { clearTimeout(iceRestartTimer); iceRestartTimer = null; }
     try {
       await pc.setRemoteDescription({ type: msg.type, sdp: msg.sdp });
       iceRestartInProgress = false;
@@ -2051,6 +2107,10 @@
       // Mute initially — we won't transmit until call is active
       micStream.getAudioTracks().forEach(t => t.enabled = false);
       setMicState('granted');
+      // Connections built before the grant have no audio track (we only
+      // added a recvonly transceiver), so without this the user joins a
+      // call, sees themselves "on air", and is silently inaudible.
+      attachMicToExistingPeers().catch(e => console.warn('mic attach failed', e));
       return true;
     } catch (err) {
       console.warn('mic denied:', err);
@@ -2293,6 +2353,7 @@
     // Switching conversations — wipe whatever's on screen so we don't
     // mix history from two rooms / peers.
     historyLoadedFor = cid;
+    releaseObjectUrls();   // free blob URLs owned by the rows we're about to drop
     els.messages.innerHTML = '';
     const [msgs, files] = await Promise.all([
       idbGetRoomMessages(cid, MESSAGES_PER_ROOM_CAP),
@@ -2352,10 +2413,14 @@
     els.emptyState?.remove();
     const div = document.createElement('div');
     div.className = `msg call ${ended ? 'ended' : ''}`;
-    div.innerHTML = `
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
-      <span>${text} · ${fmtTime(new Date())}</span>
-    `;
+    // `text` routinely embeds a peer-chosen nickname (meshPeerDisplayName),
+    // which is attacker-controlled — a signature proves *who* set it, not
+    // that it is safe markup. Build the icon with innerHTML (static) but
+    // set the caption with textContent so nothing can inject nodes.
+    div.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>' +
+      '<span></span>';
+    div.querySelector('span').textContent = `${text} · ${fmtTime(new Date())}`;
     insertMsgByTs(div, Date.now());
   };
 
@@ -2371,7 +2436,7 @@
     div.innerHTML = `
       <span class="msg-sender" style="padding:6px 12px 0;">${escapeHtml(sender)}</span>
       <div class="file-card">
-        <div class="file-icon">${name.split('.').pop().slice(0,3).toUpperCase() || 'FIL'}</div>
+        <div class="file-icon">${escapeHtml(String(name).split('.').pop().slice(0,3).toUpperCase()) || 'FIL'}</div>
         <div class="file-info">
           <div class="file-name">${escapeHtml(name)}</div>
           <div class="file-size">${fmtSize(size)} · <span class="file-pct">0%</span></div>
@@ -2399,11 +2464,24 @@
     msgEl.querySelector('.file-progress-bar').style.width = pct + '%';
     msgEl.querySelector('.file-pct').textContent = pct + '%';
   };
+  // Blob URLs live until explicitly revoked. Keeping the href direct means the
+  // Android WebView's DownloadListener still sees a blob: URL (its save
+  // bridge depends on that), but every URL we mint is tracked so it can be
+  // released when the message list is wiped — otherwise switching rooms a
+  // few times pinned hundreds of MB for the page's lifetime.
+  const liveObjectUrls = new Set();
+  const releaseObjectUrls = () => {
+    for (const u of liveObjectUrls) { try { URL.revokeObjectURL(u); } catch {} }
+    liveObjectUrls.clear();
+  };
   const finishFileMessage = (msgEl, blob, name) => {
-    const url = URL.createObjectURL(blob);
     const card = msgEl.querySelector('.file-card');
-    msgEl.querySelector('.file-progress').remove();
-    msgEl.querySelector('.file-pct').textContent = 'Complete';
+    msgEl.querySelector('.file-progress')?.remove();
+    const pct = msgEl.querySelector('.file-pct');
+    if (pct) pct.textContent = 'Complete';
+    if (card.querySelector('.file-download')) return; // already finalized
+    const url = URL.createObjectURL(blob);
+    liveObjectUrls.add(url);
     const a = document.createElement('a');
     a.href = url; a.download = name; a.className = 'file-download'; a.textContent = 'Download';
     card.appendChild(a);
@@ -2427,6 +2505,15 @@
      hits totalChunks (derivable from size / CHUNK_SIZE), the file
      is assembled and the download link is rendered. ─────────── */
   const CHUNK_SIZE = 16 * 1024;
+  // Receive-side limits. The sender enforces its own 1 GB cap, but a
+  // hostile peer controls file-meta directly, so everything a peer
+  // declares has to be bounded here too — otherwise one peer can make
+  // every other peer in the room allocate (and re-broadcast) forever.
+  const MAX_INCOMING_FILE_BYTES  = 1024 * 1024 * 1024; // 1 GB per file
+  const MAX_INFLIGHT_FILE_BYTES  = 512 * 1024 * 1024;  // total concurrent
+  const MAX_PENDING_FILES        = 32;                 // metas not yet seen
+  const MAX_PENDING_BYTES_PER_FILE = 8 * 1024 * 1024;
+  const PENDING_CHUNK_TTL_MS     = 60 * 1000;
   // Buffer chunks that arrive before their file-meta. Cleared as
   // soon as the meta is processed (or when the file completes).
   const pendingFileChunks = new Map(); // fileId -> Map<chunkIdx, chunk>
@@ -2435,6 +2522,19 @@
   // mesh paths; without this set, we'd re-render and re-finalize on
   // every duplicate. Survives deletion of incomingFiles[id].
   const completedFileIds = new Set();
+
+  const inflightIncomingBytes = () => {
+    let n = 0;
+    for (const [, f] of incomingFiles) n += (f.size || 0) - (f.bytes || 0);
+    return n;
+  };
+  // Drop pre-meta chunk buffers whose file-meta never showed up.
+  const prunePendingChunks = () => {
+    const now = Date.now();
+    for (const [id, pend] of pendingFileChunks) {
+      if (now - (pend.firstSeen || 0) > PENDING_CHUNK_TTL_MS) pendingFileChunks.delete(id);
+    }
+  };
 
   const buildChunkPacket = (id, chunkIdx, chunk) => {
     const idBytes = new TextEncoder().encode(id);
@@ -2532,11 +2632,13 @@
       return;
     }
     const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
-    dc.send(JSON.stringify({ k: 'file-meta', id, name: file.name, size: file.size, type: file.type }));
+    const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+    dc.send(JSON.stringify({
+      k: 'file-meta', id, name: file.name, size: file.size,
+      type: file.type, chunks: totalChunks,
+    }));
     const msgEl = addFileMessage('outgoing', file.name, file.size, id);
-    const idBytes = new TextEncoder().encode(id);
-    const headerLen = 1 + idBytes.length;
-    let offset = 0;
+    let offset = 0, chunkIdx = 0;
     while (offset < file.size) {
       if (dc.bufferedAmount > 8 * 1024 * 1024) {
         await new Promise(res => {
@@ -2546,11 +2648,13 @@
       }
       const slice = file.slice(offset, offset + CHUNK_SIZE);
       const buf = await slice.arrayBuffer();
-      const out = new Uint8Array(headerLen + buf.byteLength);
-      out[0] = idBytes.length; out.set(idBytes, 1); out.set(new Uint8Array(buf), headerLen);
-      try { dc.send(out.buffer); }
+      // Must match the receiver's [idLen][id][chunkIdx:u32][data] layout —
+      // this path used to omit the chunk index, so the receiver consumed
+      // the first four payload bytes as an index and corrupted every file.
+      try { dc.send(buildChunkPacket(id, chunkIdx, buf)); }
       catch (err) { console.error('send failed', err); addSystem(`File transfer failed: ${file.name}`); return; }
       offset += buf.byteLength;
+      chunkIdx += 1;
       updateFileProgress(msgEl, offset, file.size);
     }
     dc.send(JSON.stringify({ k: 'file-end', id }));
@@ -2559,7 +2663,14 @@
   const tryFinalizeFile = (f) => {
     if (!f.totalChunks || f.haveCount < f.totalChunks) return;
     const ordered = [];
-    for (let i = 0; i < f.totalChunks; i++) ordered.push(f.chunks[i]);
+    for (let i = 0; i < f.totalChunks; i++) {
+      // A missing slot would be stringified as "undefined" into the blob.
+      if (!f.chunks[i]) {
+        console.warn('[upload] refusing to finalize', f.id, '— missing chunk', i);
+        return;
+      }
+      ordered.push(f.chunks[i]);
+    }
     const blob = new Blob(ordered, { type: f.type || 'application/octet-stream' });
     finishFileMessage(f.msgEl, blob, f.name);
     console.log('[upload] file complete', f.id, f.name, f.size + 'B');
@@ -2586,14 +2697,32 @@
   const onFileMeta = (msg, senderName, fromPeerId) => {
     // Dedup against in-flight AND completed files — gossip will deliver
     // the same meta from multiple paths and we must NOT re-finalize.
+    if (typeof msg.id !== 'string' || !msg.id || msg.id.length > 64) return;
     if (incomingFiles.has(msg.id) || completedFileIds.has(msg.id)) return;
+    // The sender's 1 GB limit is advisory — a hostile peer can claim any
+    // size. Validate here so one peer can't make everyone in the room
+    // allocate unbounded memory (and re-broadcast it to their neighbours).
+    const size = Number(msg.size);
+    if (!Number.isFinite(size) || size < 0 || size > MAX_INCOMING_FILE_BYTES) {
+      console.warn('[upload] rejecting file-meta with bad size', msg.id, msg.size);
+      return;
+    }
+    if (inflightIncomingBytes() + size > MAX_INFLIGHT_FILE_BYTES) {
+      console.warn('[upload] too many concurrent incoming files — dropping', msg.id);
+      addSystem(`Declined "${String(msg.name).slice(0, 40)}" — too much data in flight`);
+      return;
+    }
     console.log('[upload] received file-meta', msg.id, msg.name, 'from', fromPeerId);
-    const totalChunks = msg.chunks || Math.max(1, Math.ceil(msg.size / CHUNK_SIZE));
-    const msgEl = addFileMessage('incoming', msg.name, msg.size, msg.id, senderName);
+    const declared = Number(msg.chunks);
+    const expected = Math.max(1, Math.ceil(size / CHUNK_SIZE));
+    // Trust the declared count only when it agrees with the declared size.
+    const totalChunks = (Number.isInteger(declared) && declared === expected) ? declared : expected;
+    const msgEl = addFileMessage('incoming', msg.name, size, msg.id, senderName);
     notifyNative(senderName || 'Peer', '📎 ' + (msg.name || 'file'));
     const f = {
-      id: msg.id, name: msg.name, size: msg.size, type: msg.type,
+      id: msg.id, name: msg.name, size, type: msg.type,
       totalChunks, chunks: new Array(totalChunks), haveCount: 0, bytes: 0, msgEl,
+      startedAt: Date.now(),
     };
     incomingFiles.set(msg.id, f);
     // Pull in any chunks that already arrived for this id.
@@ -2628,21 +2757,34 @@
     if (!f) {
       // Chunk arrived before its meta — buffer until we know totalChunks
       // and have a place to render progress. Still forward immediately
-      // so other peers (which may have meta) can finalize.
+      // so other peers (which may have meta) can finalize. Bounded and
+      // expired so chunks for a meta that never arrives can't pin memory.
+      prunePendingChunks();
       let pend = pendingFileChunks.get(id);
-      if (!pend) { pend = new Map(); pendingFileChunks.set(id, pend); }
-      if (!pend.has(chunkIdx)) {
+      if (!pend) {
+        if (pendingFileChunks.size >= MAX_PENDING_FILES) return;
+        pend = new Map();
+        pend.bytes = 0;
+        pend.firstSeen = Date.now();
+        pendingFileChunks.set(id, pend);
+      }
+      if (!pend.has(chunkIdx) && pend.bytes + chunk.byteLength <= MAX_PENDING_BYTES_PER_FILE) {
         pend.set(chunkIdx, chunk);
+        pend.bytes += chunk.byteLength;
         if (meshInAnyRoom()) {
           forwardBinaryToPeers(buildChunkPacket(id, chunkIdx, chunk), fromPeerId);
         }
       }
       return;
     }
+    // Out-of-range indices would inflate haveCount and let tryFinalizeFile
+    // assemble a blob containing `undefined` holes.
+    if (!Number.isInteger(chunkIdx) || chunkIdx < 0 || chunkIdx >= f.totalChunks) return;
     if (f.chunks[chunkIdx]) return; // dedup — already have this chunk
     f.chunks[chunkIdx] = chunk;
     f.haveCount += 1;
     f.bytes += chunk.byteLength;
+    f.lastChunkAt = Date.now();
     updateFileProgress(f.msgEl, f.bytes, f.size);
     if (meshInAnyRoom()) {
       forwardBinaryToPeers(buildChunkPacket(id, chunkIdx, chunk), fromPeerId);
@@ -3235,6 +3377,7 @@
     if (typeof incomingFiles !== 'undefined') incomingFiles.clear();
     if (typeof pendingFileChunks !== 'undefined') pendingFileChunks.clear();
     if (typeof completedFileIds !== 'undefined') completedFileIds.clear();
+    if (typeof requestedFileIds !== 'undefined') requestedFileIds.clear();
   };
 
   const gossipSeqKey = (cid) => 'seq:' + cid;
@@ -3249,6 +3392,35 @@
     catch (e) { console.warn('gossip seq save failed', e); }
   };
 
+  // Atomically claim the next outgoing seq for this room.
+  //
+  // The counter used to be bumped in memory and persisted fire-and-forget,
+  // so two tabs on the same room (or a reload racing the pending write)
+  // could both emit the same gid with different bodies — every peer's
+  // dedup then silently drops one of them forever. Claiming inside a
+  // single readwrite transaction makes the increment atomic across tabs,
+  // and awaiting it means the message is only signed once the seq is
+  // durable.
+  const gossipClaimSeq = async (cid) => {
+    const db = await openDB();
+    const next = await new Promise((res, rej) => {
+      const tx = db.transaction(STORE_GOSSIP, 'readwrite');
+      const store = tx.objectStore(STORE_GOSSIP);
+      const key = gossipSeqKey(cid);
+      const getReq = store.get(key);
+      getReq.onsuccess = () => {
+        const cur = typeof getReq.result === 'number' ? getReq.result : 0;
+        const bumped = Math.max(cur, gossipMySeq) + 1;
+        const putReq = store.put(bumped, key);
+        putReq.onsuccess = () => res(bumped);
+        putReq.onerror = () => rej(putReq.error);
+      };
+      getReq.onerror = () => rej(getReq.error);
+    });
+    gossipMySeq = next;
+    return next;
+  };
+
   // Canonical bytes for signing/verifying — JSON of the envelope minus `sig`.
   const gossipCanonical = (env) => {
     const { sig: _sig, ...rest } = env;
@@ -3258,12 +3430,22 @@
   const gossipBuild = async (kind, body) => {
     if (!myIdentity) throw new Error('No identity');
     if (!roomIdHex) throw new Error('Not in a room');
-    gossipMySeq += 1;
+    const cid = currentConversationId();
+    // Durably claim the seq before signing, so a crash/reload can never
+    // hand the same gid to two different message bodies.
+    let seq;
+    try {
+      seq = await gossipClaimSeq(cid);
+    } catch (e) {
+      console.warn('gossip seq claim failed, falling back to in-memory', e);
+      seq = ++gossipMySeq;
+      gossipSaveSeq(cid);
+    }
     const env = {
       k: 'g',
       t: kind,
       sfp: myIdentity.fingerprint,
-      seq: gossipMySeq,
+      seq,
       ts: Date.now(),
       body,
       pk: myIdentity.publicJwk,
@@ -3275,8 +3457,6 @@
       gossipCanonical(env)
     );
     env.sig = b64uEncode(sig);
-    // Persist seq fire-and-forget so we don't reuse on reload.
-    gossipSaveSeq(currentConversationId());
     return env;
   };
 
@@ -3327,22 +3507,53 @@
   // just max, so a peer with older history can be detected and pulled
   // even when their max is below ours. (Without min, "I have stuff
   // you don't" only shows up in one direction.)
-  const gossipBuildHaveVector = async () => {
+  // Per-sender seq sets for the current room, built once per sync pass.
+  const gossipBuildSeqSets = async () => {
     const cid = currentConversationId();
-    if (!cid) return {};
+    if (!cid) return new Map();
     const msgs = await idbGetRoomMessages(cid, 100000);
-    const v = {};
-    const note = (sfp, seq) => {
-      const cur = v[sfp];
-      if (!cur) v[sfp] = [seq, seq];
-      else { if (seq < cur[0]) cur[0] = seq; if (seq > cur[1]) cur[1] = seq; }
-    };
+    const sets = new Map(); // sfp -> Set<seq>
     for (const m of msgs) {
       if (typeof m.sfp !== 'string' || typeof m.seq !== 'number') continue;
-      note(m.sfp, m.seq);
+      let s = sets.get(m.sfp);
+      if (!s) { s = new Set(); sets.set(m.sfp, s); }
+      s.add(m.seq);
     }
-    if (myIdentity && gossipMySeq > 0) note(myIdentity.fingerprint, gossipMySeq);
+    if (myIdentity && gossipMySeq > 0) {
+      let s = sets.get(myIdentity.fingerprint);
+      if (!s) { s = new Set(); sets.set(myIdentity.fingerprint, s); }
+      s.add(gossipMySeq);
+    }
+    return sets;
+  };
+
+  const gossipBuildHaveVector = async () => {
+    const sets = await gossipBuildSeqSets();
+    const v = {};
+    for (const [sfp, seqs] of sets) {
+      let min = Infinity, max = 0;
+      for (const q of seqs) { if (q < min) min = q; if (q > max) max = q; }
+      if (min !== Infinity) v[sfp] = [min, max];
+    }
     return v;
+  };
+
+  // Holes *inside* our own [min,max] range. The have-vector can only say
+  // "I have 1..20", so a local history of {1-5, 15-20} looked complete and
+  // 6..14 was never requested from anyone. Detect those gaps locally and
+  // ask for them explicitly during each sync.
+  const gossipLocalGaps = async (maxRanges = 24) => {
+    const sets = await gossipBuildSeqSets();
+    const gaps = [];
+    for (const [sfp, seqs] of sets) {
+      const sorted = Array.from(seqs).sort((a, b) => a - b);
+      for (let i = 1; i < sorted.length && gaps.length < maxRanges; i++) {
+        const prev = sorted[i - 1], cur = sorted[i];
+        if (cur > prev + 1) gaps.push({ sfp, from: prev + 1, to: cur - 1 });
+      }
+      if (gaps.length >= maxRanges) break;
+    }
+    return gaps;
   };
 
   // Find stored envelopes for a (sfp, seq-range) request. Caps results.
@@ -3350,14 +3561,22 @@
     const cid = currentConversationId();
     if (!cid) return [];
     const all = await idbGetRoomMessages(cid, 100000);
-    const out = [];
+    const matches = [];
     for (const m of all) {
       if (m.sfp !== sfp) continue;
       if (typeof m.seq !== 'number') continue;
       if (m.seq < fromSeq || m.seq > toSeq) continue;
       if (!m.env) continue;
+      matches.push(m);
+    }
+    // Serve in seq order and take the lowest GOSSIP_BATCH_MAX. IndexedDB
+    // iterates in insertion order, so an unsorted slice returned an
+    // arbitrary subset — leaving holes the continuation logic could not
+    // reason about.
+    matches.sort((a, b) => a.seq - b.seq);
+    const out = [];
+    for (const m of matches.slice(0, GOSSIP_BATCH_MAX)) {
       try { out.push(JSON.parse(m.env)); } catch {}
-      if (out.length >= GOSSIP_BATCH_MAX) break;
     }
     return out;
   };
@@ -3387,12 +3606,70 @@
   // peers they did connect to. Bigger K = more redundancy, more setup
   // cost; smaller K = leaner mesh, more reliance on gossip paths.
   const MESH_DEGREE = 3;
+  // How long a peer entry may sit without reaching `connected` before we
+  // consider the handshake dead and free the slot for a repair attempt.
+  const MESH_HANDSHAKE_TIMEOUT_MS = 20000;
+  // Everyone the relay says is currently in the room (maintained from
+  // joined / peer-joined / peer-left). Used to re-link the mesh when a
+  // peer we depended on disappears.
+  let roomRoster = new Set();
 
   const meshInAnyRoom  = () => meshPeers.size > 0;
   const meshConnectedCount = () => {
     let n = 0;
     for (const [, e] of meshPeers) if (e.dc && e.dc.readyState === 'open') n++;
     return n;
+  };
+
+  // Sparse mesh repair.
+  //
+  // Peers used to pick their neighbours exactly once, at join time. When a
+  // bridge peer left, the two halves of the room were partitioned forever
+  // and gossip silently stopped flowing. This tops the local degree back up
+  // from the roster whenever connectivity drops — on peer-left, on channel
+  // close, and from the heartbeat.
+  const meshEnsureDegree = () => {
+    if (!roomWS || roomWS.readyState !== 1) return;
+    // Reap handshakes that never completed so they don't pin slots.
+    const now = Date.now();
+    for (const [pid, e] of Array.from(meshPeers)) {
+      const open = e.dc && e.dc.readyState === 'open';
+      if (!open && e.startedAt && now - e.startedAt > MESH_HANDSHAKE_TIMEOUT_MS) {
+        console.warn('[mesh] handshake timed out, dropping', pid);
+        meshRemoveEntry(pid);
+      }
+    }
+    const active = new Set();
+    for (const [pid, e] of meshPeers) {
+      if (e.dc && e.dc.readyState === 'open') active.add(pid);
+      else if (e.pc) active.add(pid); // in-progress attempt still counts
+    }
+    const need = MESH_DEGREE - active.size;
+    if (need <= 0) return;
+    const candidates = [];
+    for (const pid of roomRoster) {
+      if (pid === myRoomPeerId) continue;
+      if (meshPeers.has(pid)) continue;
+      candidates.push(pid);
+    }
+    if (!candidates.length) return;
+    for (let i = candidates.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+    }
+    for (const pid of candidates.slice(0, need)) {
+      console.log('[mesh] linking to', pid, '(degree', active.size, '->', MESH_DEGREE + ')');
+      meshInitiate(pid).catch(e => console.warn('mesh initiate failed', pid, e));
+    }
+  };
+
+  // Single source of truth for the room-panel status line, so transient
+  // messages like "New peer joining…" can't stick around forever.
+  const refreshRoomStatus = () => {
+    if (!roomWS || roomWS.readyState !== 1) return;
+    const n = meshConnectedCount();
+    if (n === 0) setRoomStatus('Waiting for peers…', '');
+    else setRoomStatus(`${n} peer${n > 1 ? 's' : ''} connected`, 'active');
   };
   const meshPeerDisplayName = (entry) => {
     if (!entry) return 'peer';
@@ -3511,6 +3788,8 @@
       pc: null, dc: null,
       identityFp: null, nickname: null,
       pendingCandidates: [], remoteDescSet: false,
+      // Used to reap handshakes that never reach `connected`.
+      startedAt: Date.now(),
     };
     meshPeers.set(peerId, entry);
     return entry;
@@ -3542,7 +3821,10 @@
       for (const [, e] of meshPeers) if (e.inCall) { anyOnCall = true; break; }
       if (!anyOnCall) meshCallExit();
     }
-    if (meshPeers.size === 0) stopMeshHeartbeat();
+    // Keep the heartbeat alive while we're still in a room — it is what
+    // drives mesh repair, so stopping it when the last peer drops would
+    // strand us with no way back in.
+    if (meshPeers.size === 0 && !roomWS) stopMeshHeartbeat();
     updateMeshStatus();
     if (meshPeers.size === 0 && !pc) {
       els.peerPill.classList.remove('connected', 'trusted');
@@ -3598,6 +3880,14 @@
     entry.inCall = true; // inviter is on air
     renderMemberBar();
     if (inCall) return; // already on air — no banner needed
+    // A second invite used to overwrite the first, so Decline only ever
+    // answered the latest inviter and the earlier one waited forever.
+    if (pendingCallInviter && pendingCallInviter.peerId !== entry.peerId) {
+      const prev = pendingCallInviter;
+      if (prev.dc && prev.dc.readyState === 'open') {
+        try { prev.dc.send(JSON.stringify({ k: 'call-decline' })); } catch {}
+      }
+    }
     pendingCallInviter = entry;
     const inviter = meshPeerDisplayName(entry);
     const sub = els.callBanner.querySelector('.text small');
@@ -3752,7 +4042,14 @@
     };
     channel.onclose = () => {
       if (meshConnectedCount() === 0 && !dc) disableComposer();
+      // A closed channel whose pc hasn't failed yet would otherwise keep
+      // its slot and leave us below the target degree indefinitely.
+      if (entry.pc && entry.pc.connectionState !== 'connected') {
+        meshRemoveEntry(entry.peerId);
+      }
       updateMeshStatus();
+      meshEnsureDegree();
+      refreshRoomStatus();
     };
     channel.onerror = (e) => {
       // "User-Initiated Abort, reason=Close called" fires on every
@@ -3787,6 +4084,61 @@
     } catch (e) { console.warn('meshIceRestart failed', e); }
   };
 
+  // Attach the microphone to connections that were negotiated before the
+  // user granted mic access. Those peers only got a recvonly transceiver,
+  // so without re-negotiating we would appear to be in the call while
+  // transmitting nothing at all.
+  const attachMicToExistingPeers = async () => {
+    if (!micStream) return;
+    const track = micStream.getAudioTracks()[0];
+    if (!track) return;
+
+    // Legacy 1:1 connection.
+    if (pc) {
+      try {
+        if (audioSender) {
+          await audioSender.replaceTrack(track);
+        } else {
+          const t = (typeof audioTransceiver !== 'undefined' && audioTransceiver)
+            ? audioTransceiver
+            : pc.getTransceivers().find(x => x.receiver?.track?.kind === 'audio');
+          if (t) {
+            await t.sender.replaceTrack(track);
+            try { t.direction = 'sendrecv'; } catch {}
+            audioSender = t.sender;
+          } else {
+            audioSender = pc.addTrack(track, micStream);
+          }
+          if (role === 'host') attemptIceRestart().catch(() => {});
+        }
+      } catch (e) { console.warn('legacy mic attach failed', e); }
+    }
+
+    // Mesh peers.
+    for (const [, entry] of meshPeers) {
+      if (!entry.pc) continue;
+      try {
+        if (entry.audioSender) {
+          await entry.audioSender.replaceTrack(track);
+          continue;
+        }
+        const t = entry.pc.getTransceivers()
+          .find(x => x.receiver?.track?.kind === 'audio');
+        if (t) {
+          await t.sender.replaceTrack(track);
+          try { t.direction = 'sendrecv'; } catch {}
+          entry.audioSender = t.sender;
+        } else {
+          entry.audioSender = entry.pc.addTrack(track, micStream);
+        }
+        // Direction/track changes need a new offer; only the initiator
+        // side may drive it to avoid glare.
+        if (entry.outgoing) await meshIceRestart(entry);
+      } catch (e) { console.warn('mesh mic attach failed', entry.peerId, e); }
+    }
+    updateCallUI();
+  };
+
   // Heartbeat across the mesh: send {k:'ping'} every 10s on each open
   // data channel. meshHandleIncoming stamps entry.lastHeardFrom on any
   // message. If we haven't heard in ~25s, trigger ICE restart.
@@ -3805,6 +4157,10 @@
           }
         }
       }
+      // Periodic safety net: reap dead handshakes and re-link if the
+      // room grew or a neighbour vanished without a peer-left notice.
+      meshEnsureDegree();
+      prunePendingChunks();
     }, 10000);
   };
   const stopMeshHeartbeat = () => {
@@ -3889,9 +4245,22 @@
   // the same peer so we don't echo back to them.
   const gossipIngest = async (env, fromPeerId) => {
     if (!gossipSeen) return;
+    if (typeof env?.gid !== 'string') return;
     if (gossipSeen.has(env.gid)) return;
-    if (!(await gossipVerify(env))) return;
+    // Claim the gid BEFORE the async verify. Two neighbours forwarding the
+    // same envelope would otherwise both pass the has() check while the
+    // first copy is still inside ECDSA verification, and the message would
+    // be rendered and persisted twice.
     gossipSeen.add(env.gid);
+    // Capture the room this ingest belongs to — a reconnect or room switch
+    // can land while we're awaiting, and we must not persist into the
+    // wrong conversation.
+    const ingestCid = currentConversationId();
+    let ok = false;
+    try { ok = await gossipVerify(env); }
+    catch { ok = false; }
+    if (!ok) { gossipSeen.delete(env.gid); return; }
+    if (currentConversationId() !== ingestCid) return;
     if (env.t === 'txt') {
       // Prefer the verified identity fingerprint to label the sender.
       // Fall back to nickname from a known peer entry, then a short hash.
@@ -3938,47 +4307,68 @@
 
   // We received a peer's file-have list — request anything we don't
   // already have (and haven't already finalized).
+  // Files we've already asked *someone* for, so a second holder
+  // advertising the same file doesn't trigger a duplicate transfer.
+  const requestedFileIds = new Map(); // fileId -> requestedAt
+  const FILE_REQUEST_RETRY_MS = 45000;
+
   const gossipOnFileHave = async (entry, list) => {
     if (!Array.isArray(list)) return;
     if (!entry.dc || entry.dc.readyState !== 'open') return;
     const cid = currentConversationId();
     if (!cid) return;
+    const now = Date.now();
     for (const meta of list) {
       if (!meta || typeof meta.id !== 'string') continue;
       if (completedFileIds.has(meta.id)) continue;
       if (incomingFiles.has(meta.id)) continue;
+      // Only one holder is asked at a time; if that transfer never
+      // materialises another advertiser can pick it up after the retry
+      // window. Without this every holder answers and floods the room.
+      const askedAt = requestedFileIds.get(meta.id);
+      if (askedAt && now - askedAt < FILE_REQUEST_RETRY_MS) continue;
       const local = await idbGetFile(meta.id);
       if (local) { completedFileIds.add(meta.id); continue; }
+      requestedFileIds.set(meta.id, now);
       try { entry.dc.send(JSON.stringify({ k: 'want-file', id: meta.id })); } catch {}
     }
   };
-
-  // Peer asked us for a file. Look up the blob locally and re-emit it
-  // through the same file-meta + chunk pipeline (not just to the
-  // requester — gossip will bring it to anyone else who needs it too).
+  // Serve a stored file to the peer that asked for it.
+  //
+  // This used to *broadcast* the whole file to every neighbour. With k
+  // holders answering the same want-file, a late joiner in a busy room
+  // triggered k full-file floods that dedup then threw away — so send it
+  // unicast down the requester's channel and let normal gossip handle
+  // anyone else who is missing it.
   const gossipOnWantFile = async (entry, msg) => {
     if (!msg || typeof msg.id !== 'string') return;
+    if (!entry.dc || entry.dc.readyState !== 'open') return;
+    if (entry.servingFiles && entry.servingFiles.has(msg.id)) return; // already sending
     const rec = await idbGetFile(msg.id);
     if (!rec || !rec.blob) return;
+    if (!entry.servingFiles) entry.servingFiles = new Set();
+    entry.servingFiles.add(msg.id);
     const totalChunks = Math.max(1, Math.ceil(rec.size / CHUNK_SIZE));
     const meta = { k: 'file-meta', id: rec.id, name: rec.name, size: rec.size, type: rec.type, chunks: totalChunks };
-    // Send the meta to all open peers (gossip dedups on the receivers).
-    const sent = meshBroadcastString(JSON.stringify(meta));
-    if (sent === 0) return;
-    console.log('[upload] re-serving', rec.id, rec.name, 'as', totalChunks, 'chunks (requested by', entry.peerId + ')');
+    const send = (payload) => {
+      if (!entry.dc || entry.dc.readyState !== 'open') return false;
+      try { entry.dc.send(payload); return true; } catch { return false; }
+    };
+    if (!send(JSON.stringify(meta))) { entry.servingFiles.delete(msg.id); return; }
+    console.log('[upload] re-serving', rec.id, rec.name, 'as', totalChunks, 'chunks to', entry.peerId);
     let offset = 0, chunkIdx = 0;
     try {
       while (offset < rec.size) {
         await meshWaitForDrain();
         const slice = rec.blob.slice(offset, offset + CHUNK_SIZE);
         const buf = await slice.arrayBuffer();
-        const packet = buildChunkPacket(rec.id, chunkIdx, buf);
-        if (meshBroadcastBinary(packet) === 0) break;
+        if (!send(buildChunkPacket(rec.id, chunkIdx, buf))) break;
         offset += buf.byteLength;
         chunkIdx += 1;
       }
-      meshBroadcastString(JSON.stringify({ k: 'file-end', id: rec.id }));
+      send(JSON.stringify({ k: 'file-end', id: rec.id }));
     } catch (e) { console.warn('re-serve failed', e); }
+    finally { entry.servingFiles.delete(msg.id); }
   };
 
   // We received the peer's have-vector — request anything we're missing.
@@ -4002,6 +4392,15 @@
       if (rMax > lMax) wants.push({ k: 'want', s: sfp, from: lMax + 1, to: rMax });
       if (rMin < lMin) wants.push({ k: 'want', s: sfp, from: rMin, to: lMin - 1 });
     }
+    // Also fill holes strictly inside our own range, which the [min,max]
+    // summary cannot express — but only where this peer plausibly has them.
+    for (const g of await gossipLocalGaps()) {
+      const r = remoteV?.[g.sfp];
+      if (!Array.isArray(r)) continue;
+      const from = Math.max(g.from, r[0] | 0);
+      const to = Math.min(g.to, r[1] | 0);
+      if (from <= to) wants.push({ k: 'want', s: g.sfp, from, to });
+    }
     for (const w of wants) {
       try { entry.dc.send(JSON.stringify(w)); } catch {}
     }
@@ -4010,15 +4409,34 @@
   const gossipOnWant = async (entry, msg) => {
     if (!entry.dc || entry.dc.readyState !== 'open') return;
     if (typeof msg.s !== 'string' || typeof msg.from !== 'number' || typeof msg.to !== 'number') return;
+    if (!Number.isFinite(msg.from) || !Number.isFinite(msg.to) || msg.to < msg.from) return;
     const items = await gossipFindBatch(msg.s, msg.from, msg.to);
     if (!items.length) return;
-    try { entry.dc.send(JSON.stringify({ k: 'batch', m: items })); } catch {}
+    // Tell the requester the range this batch covers and whether it was
+    // truncated, so they can continue instead of silently losing the tail.
+    const maxSeq = items.reduce((a, e) => Math.max(a, e.seq | 0), 0);
+    const more = items.length >= GOSSIP_BATCH_MAX && maxSeq < msg.to;
+    try {
+      entry.dc.send(JSON.stringify({
+        k: 'batch', m: items, s: msg.s, more, next: more ? maxSeq + 1 : 0, to: msg.to,
+      }));
+    } catch {}
   };
 
   const gossipOnBatch = async (entry, msg) => {
     if (!Array.isArray(msg.m)) return;
     for (const env of msg.m) {
       await gossipIngest(env, entry.peerId);
+    }
+    // A batch is capped at GOSSIP_BATCH_MAX; without this continuation a
+    // peer missing hundreds of messages only ever recovered the first 50
+    // per reconnect and believed the rest didn't exist.
+    if (msg.more && typeof msg.s === 'string' &&
+        Number.isFinite(msg.next) && Number.isFinite(msg.to) && msg.next <= msg.to &&
+        entry.dc && entry.dc.readyState === 'open') {
+      try {
+        entry.dc.send(JSON.stringify({ k: 'want', s: msg.s, from: msg.next, to: msg.to }));
+      } catch {}
     }
   };
 
@@ -4127,8 +4545,10 @@
     roomKey = null;
     roomIdHex = null;
     myRoomPeerId = null;
+    roomRoster = new Set();
     gossipResetState();
     meshClearAll();
+    stopMeshHeartbeat();
     if (els.btnJoinRoom) {
       els.btnJoinRoom.disabled = false;
       els.btnJoinRoom.textContent = 'Join Room';
@@ -4179,10 +4599,6 @@
   });
 
   const roomJoin = async (passcode) => {
-    // Tear down any prior session FIRST — even if the ws already
-    // closed unexpectedly. Without this, dead RTCPeerConnection
-    // entries sit in meshPeers and meshInitiate's `if (entry.pc)`
-    // guard makes every retry a no-op.
     if (roomReconnectTimer) {
       clearTimeout(roomReconnectTimer);
       roomReconnectTimer = null;
@@ -4192,13 +4608,31 @@
       try { roomWS.close(); } catch {}
       roomWS = null;
     }
-    meshClearAll();
-    roomResetConnection();
 
     const { id, key } = await deriveRoom(passcode);
+    // The relay only carries signaling. Peer connections that are still
+    // healthy do not depend on it, so a reconnect into the SAME room must
+    // keep them — otherwise every transient blip kills live chat, in-flight
+    // file transfers and active calls. Only stale/failed entries are
+    // dropped, since those are what previously wedged meshInitiate's
+    // `if (entry.pc) return` guard.
+    const sameRoom = (roomIdHex === id);
+    if (sameRoom) {
+      for (const [peerId, e] of Array.from(meshPeers)) {
+        const healthy = e.dc && e.dc.readyState === 'open' &&
+                        e.pc && e.pc.connectionState === 'connected';
+        if (!healthy) meshRemoveEntry(peerId);
+      }
+    } else {
+      meshClearAll();
+      roomResetConnection();
+    }
+
     roomIdHex = id;
     roomKey = key;
-    gossipResetState();
+    // Preserve gossip/dedup state across a same-room reconnect; a genuine
+    // room switch still gets a clean slate.
+    if (!sameRoom || !gossipSeen) gossipResetState();
     const cid = 'room_' + roomIdHex;
     // IMPORTANT: do NOT reset historyLoadedFor here. roomJoin runs on
     // every auto-reconnect (transient WS blip) and loadAndRenderHistory
@@ -4284,43 +4718,38 @@
         if (msg.type === 'joined') {
           myRoomPeerId = msg.peerId;
           const existing = Array.isArray(msg.peers) ? msg.peers : [];
-          if (existing.length === 0) {
+          roomRoster = new Set(existing);
+          if (existing.length === 0 && meshConnectedCount() === 0) {
             setRoomStatus('Room ready — waiting for peers', 'active');
             setStatus('connecting', 'Waiting for peers…');
             toast('Room ready — share the passcode with your peers');
           } else {
-            // Sparse mesh: connect to a random subset of up to
-            // MESH_DEGREE existing peers. Gossip fills in the rest.
-            const shuffled = existing.slice();
-            for (let i = shuffled.length - 1; i > 0; i--) {
-              const j = Math.floor(Math.random() * (i + 1));
-              [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-            }
-            const picks = shuffled.slice(0, MESH_DEGREE);
-            setRoomStatus(
-              `Connecting to ${picks.length} of ${existing.length} peer${existing.length > 1 ? 's' : ''}`,
-              'active'
-            );
             setStatus('connecting', 'Building mesh…');
-            for (const pid of picks) {
-              meshInitiate(pid).catch(e => {
-                console.error('mesh initiate failed', pid, e);
-                toast('Handshake failed for a peer', true);
-              });
-            }
+            meshEnsureDegree();
           }
+          // Run the heartbeat from the moment we're in the room, not just
+          // once a channel opens — otherwise a room where every handshake
+          // fails has nothing left to reap dead entries or retry links.
+          startMeshHeartbeat();
         } else if (msg.type === 'peer-joined') {
           if (typeof msg.peerId !== 'string') return;
-          setRoomStatus('New peer joining…', 'active');
-          // They will initiate to us; we wait for their offer.
+          roomRoster.add(msg.peerId);
+          // They will initiate to us; we wait for their offer. Status is
+          // refreshed by updateMeshStatus once a channel actually opens,
+          // so this transient line no longer sticks forever.
+          if (meshConnectedCount() === 0) setRoomStatus('New peer joining…', 'active');
         } else if (msg.type === 'peer-left') {
           if (typeof msg.peerId !== 'string') return;
+          roomRoster.delete(msg.peerId);
           const entry = meshPeers.get(msg.peerId);
           const name = entry ? meshPeerDisplayName(entry) : 'peer';
+          const wasKnown = !!entry;
           meshRemoveEntry(msg.peerId);
-          addSystem(`${name} left the room`);
-          if (meshPeers.size === 0) setRoomStatus('Waiting for peers…', '');
-          else setRoomStatus(`${meshConnectedCount()} peer${meshConnectedCount() > 1 ? 's' : ''} connected`, 'active');
+          if (wasKnown) addSystem(`${name} left the room`);
+          // A departing peer may have been our only bridge to part of the
+          // room — re-link so the mesh cannot stay partitioned.
+          meshEnsureDegree();
+          refreshRoomStatus();
         } else if (msg.type === 'signal') {
           if (typeof msg.from !== 'string' || typeof msg.payload !== 'string') return;
           try {
@@ -4586,7 +5015,12 @@
     setStep('step-h1','active'); setStep('step-h2','inactive');
     setStep('step-j1','active'); setStep('step-j2','inactive');
 
+    releaseObjectUrls();   // free blob URLs owned by the rows we're about to drop
     els.messages.innerHTML = '';
+    // The DOM is gone, so forget which conversation was rendered —
+    // otherwise rejoining the same room short-circuits the history
+    // reload and the chat stays blank despite IndexedDB having it.
+    historyLoadedFor = null;
     const empty = document.createElement('div');
     empty.className = 'empty-state'; empty.id = 'emptyState';
     empty.innerHTML = `
@@ -4617,11 +5051,15 @@
       catch (e) { console.warn('gossip build failed', e); toast('Send failed', true); return; }
       const payload = JSON.stringify(env);
       const n = meshBroadcastString(payload);
-      if (n === 0) { toast('No peers connected', true); return; }
+      // Store and display even when nothing was sent. The seq is already
+      // durably claimed and will be advertised in our have-vector, so
+      // dropping the message here would leave peers requesting a gap we
+      // can never fill. Keeping it means it syncs on the next connection.
       gossipSeen.add(env.gid); // we already have it, don't accept echoes
       addMessage('outgoing', text, undefined, {
         gid: env.gid, sfp: env.sfp, seq: env.seq, ts: env.ts, env: payload,
       });
+      if (n === 0) toast('No peers connected — will send when a peer joins', true);
     } else {
       if (!dc || dc.readyState !== 'open') return;
       dc.send(JSON.stringify({ k: 'txt', b: text }));

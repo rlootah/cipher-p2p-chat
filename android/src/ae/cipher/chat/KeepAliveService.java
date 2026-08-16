@@ -58,6 +58,14 @@ public class KeepAliveService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // START_STICKY can restart us in a brand-new process where no
+        // WebView exists — the page (and therefore the connection) is gone.
+        // Claiming "Cipher connected" then would be a lie, so stand down
+        // and let the user relaunch instead.
+        if (flags != 0 && !CipherApp.get().hasLiveWebView()) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         return START_STICKY; // restart if the system kills us
     }
 

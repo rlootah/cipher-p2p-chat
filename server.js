@@ -56,6 +56,24 @@ const server = http.createServer((req, res) => {
         'Cache-Control': 'no-cache',
         'Referrer-Policy': 'no-referrer',
         'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+        // Defence in depth for the single-file client: everything it needs
+        // is inline or same-origin, plus Google Fonts and the STUN/TURN
+        // endpoints. Blocking other origins means an injected node cannot
+        // exfiltrate identity keys or history even if escaping ever fails.
+        'Content-Security-Policy': [
+          "default-src 'self'",
+          "script-src 'unsafe-inline' 'self'",
+          "style-src 'unsafe-inline' 'self' https://fonts.googleapis.com",
+          "font-src 'self' https://fonts.gstatic.com data:",
+          "img-src 'self' data: blob:",
+          "media-src 'self' blob: mediastream:",
+          "connect-src 'self' ws: wss: blob: data:",
+          "frame-ancestors 'none'",
+          "base-uri 'none'",
+          "form-action 'none'",
+          "object-src 'none'",
+        ].join('; '),
       });
       res.end(data);
     });
@@ -72,6 +90,29 @@ const rooms = new Map();
 // mesh + gossip layer for chat sync, so this can comfortably exceed
 // the old full-mesh practical limit of ~6.
 const ROOM_MAX = 32;
+
+// Abuse limits. The relay is deliberately dumb, but "dumb" must not mean
+// "free to exhaust": without these, one client could open unlimited
+// sockets, create unlimited rooms, or flood signal traffic until the
+// process dies.
+const MAX_TOTAL_CONNECTIONS = 5000;
+const MAX_CONNECTIONS_PER_IP = 50;
+const MAX_ROOMS = 2000;
+const MSG_RATE_WINDOW_MS = 10000;
+const MSG_RATE_MAX = 300;           // messages per window per socket
+// Optional origin allowlist (comma-separated). Unset = allow any, which
+// keeps self-hosting simple; set it in production to block cross-site
+// WebSocket connections from arbitrary pages.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+const connectionsPerIp = new Map(); // ip -> count
+
+function clientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (typeof fwd === 'string' && fwd.length) return fwd.split(',')[0].trim();
+  return req.socket.remoteAddress || 'unknown';
+}
 
 function send(ws, obj) {
   if (ws.readyState !== 1) return;
@@ -98,13 +139,46 @@ function removeFromRoom(ws) {
 }
 
 wss.on('connection', (ws, req) => {
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS.length && origin && !ALLOWED_ORIGINS.includes(origin)) {
+    try { ws.close(1008, 'origin not allowed'); } catch {}
+    return;
+  }
+  if (wss.clients.size > MAX_TOTAL_CONNECTIONS) {
+    try { ws.close(1013, 'server busy'); } catch {}
+    return;
+  }
+  const ip = clientIp(req);
+  const ipCount = (connectionsPerIp.get(ip) || 0) + 1;
+  if (ipCount > MAX_CONNECTIONS_PER_IP) {
+    try { ws.close(1013, 'too many connections'); } catch {}
+    return;
+  }
+  connectionsPerIp.set(ip, ipCount);
+  ws.clientIp = ip;
+
   ws.peerId = crypto.randomBytes(8).toString('hex');
   ws.room = null;
   ws.isAlive = true;
+  ws.msgWindowStart = Date.now();
+  ws.msgCount = 0;
 
   ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw) => {
+    // Per-socket rate limit — a room member can otherwise spin the relay
+    // (and every peer it forwards to) with unbounded signal traffic.
+    const now = Date.now();
+    if (now - ws.msgWindowStart > MSG_RATE_WINDOW_MS) {
+      ws.msgWindowStart = now;
+      ws.msgCount = 0;
+    }
+    if (++ws.msgCount > MSG_RATE_MAX) {
+      send(ws, { type: 'error', error: 'rate limited' });
+      try { ws.close(1008, 'rate limited'); } catch {}
+      return;
+    }
+
     let msg;
     try { msg = JSON.parse(raw.toString()); }
     catch { return; }
@@ -121,9 +195,21 @@ wss.on('connection', (ws, req) => {
         return;
       }
       let members = rooms.get(msg.room);
-      if (!members) { members = new Map(); rooms.set(msg.room, members); }
+      if (!members) {
+        // Creating a room is free, so cap how many can exist at once —
+        // otherwise a single client can mint unlimited rooms and grow the
+        // map until the process runs out of memory.
+        if (rooms.size >= MAX_ROOMS) {
+          send(ws, { type: 'error', error: 'server at capacity' });
+          return;
+        }
+        members = new Map();
+        rooms.set(msg.room, members);
+      }
       if (members.size >= ROOM_MAX) {
         send(ws, { type: 'error', error: 'room full' });
+        // An empty room we just created must not be left behind.
+        if (members.size === 0) rooms.delete(msg.room);
         return;
       }
       ws.room = msg.room;
@@ -152,8 +238,17 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  ws.on('close', () => removeFromRoom(ws));
-  ws.on('error', () => removeFromRoom(ws));
+  const cleanup = () => {
+    removeFromRoom(ws);
+    if (ws.clientIp) {
+      const left = (connectionsPerIp.get(ws.clientIp) || 1) - 1;
+      if (left > 0) connectionsPerIp.set(ws.clientIp, left);
+      else connectionsPerIp.delete(ws.clientIp);
+      ws.clientIp = null;
+    }
+  };
+  ws.on('close', cleanup);
+  ws.on('error', cleanup);
 });
 
 const pingInterval = setInterval(() => {
