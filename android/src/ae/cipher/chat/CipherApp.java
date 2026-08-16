@@ -111,6 +111,31 @@ public class CipherApp extends Application {
         try { nm.notify(id, b.build()); } catch (Exception ignored) {}
     }
 
+    // Turns the screen off when the phone is held to the ear during a
+    // call — same behavior as the system dialer. Only active while on
+    // the earpiece; disabled on loudspeaker (you're looking at the phone).
+    private android.os.PowerManager.WakeLock proximityLock;
+
+    private void updateProximityLock(boolean wantOn) {
+        try {
+            android.os.PowerManager pm =
+                    (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (wantOn) {
+                if (proximityLock == null) {
+                    if (!pm.isWakeLockLevelSupported(android.os.PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) return;
+                    proximityLock = pm.newWakeLock(
+                            android.os.PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK, "cipher:proximity");
+                    proximityLock.setReferenceCounted(false);
+                }
+                if (!proximityLock.isHeld()) proximityLock.acquire();
+            } else if (proximityLock != null && proximityLock.isHeld()) {
+                // Wait for the sensor to report "far" so the screen doesn't
+                // flash on while the phone is still against the ear.
+                proximityLock.release(android.os.PowerManager.RELEASE_FLAG_WAIT_FOR_NO_PROXIMITY);
+            }
+        } catch (Exception ignored) {}
+    }
+
     /**
      * Route call audio like a phone: MODE_IN_COMMUNICATION + earpiece by
      * default, loudspeaker only when the user toggles it. Runs on the
@@ -119,6 +144,7 @@ public class CipherApp extends Application {
     private void applyCallAudio(final boolean inCall, final boolean speakerOn) {
         main.post(new Runnable() {
             @Override public void run() {
+                updateProximityLock(inCall && !speakerOn);
                 try {
                     android.media.AudioManager am =
                             (android.media.AudioManager) getSystemService(Context.AUDIO_SERVICE);
