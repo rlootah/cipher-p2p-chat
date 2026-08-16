@@ -556,6 +556,12 @@
   .msg {
     max-width: 70%; padding: 10px 14px; border-radius: 4px;
     font-size: 14px; line-height: 1.5;
+    /* .messages is a scrolling flex column, where items default to
+       flex-shrink: 1. Once the chat is long enough to overflow, bubbles
+       were compressed below their content height and the content painted
+       on top of the messages underneath. Items in a scrolling column must
+       keep their natural height and let the container scroll. */
+    flex-shrink: 0;
     /* `overflow-wrap: anywhere` makes long unbreakable strings
        (URLs, room ids, fingerprints) wrap mid-token instead of
        blowing the bubble past the container's right edge. The
@@ -600,6 +606,10 @@
        display:none (mobile setup-drawer initial render). */
     padding: 0;
     display: block;
+    /* Safety net for the case where this bubble is first laid out while
+       .messages is display:none (mobile setup drawer), which used to
+       leave it measured at 0px. Paired with flex-shrink:0 on .msg so it
+       can never become a squash target. */
     min-height: 64px;
     width: fit-content;
     max-width: min(70%, 380px);
@@ -2401,12 +2411,27 @@
     insertMsgByTs(divider, Date.now());
   };
 
+  // Connection churn (a peer whose handshake keeps failing) used to paper
+  // the chat with the same "X disconnected" line over and over. Collapse
+  // repeats of the same notice within a short window into a single row
+  // with a counter.
+  const SYSTEM_DEDUP_MS = 60000;
+  let lastSystemText = null, lastSystemAt = 0, lastSystemEl = null, lastSystemCount = 1;
   const addSystem = (text) => {
     els.emptyState?.remove();
+    const now = Date.now();
+    if (text === lastSystemText && lastSystemEl && lastSystemEl.isConnected &&
+        now - lastSystemAt < SYSTEM_DEDUP_MS) {
+      lastSystemCount += 1;
+      lastSystemEl.textContent = `— ${text} (×${lastSystemCount}) —`;
+      lastSystemAt = now;
+      return;
+    }
     const div = document.createElement('div');
     div.className = 'msg system';
     div.textContent = `— ${text} —`;
-    insertMsgByTs(div, Date.now());
+    insertMsgByTs(div, now);
+    lastSystemText = text; lastSystemAt = now; lastSystemEl = div; lastSystemCount = 1;
   };
 
   const addCallEvent = (text, ended = false) => {
@@ -3613,6 +3638,10 @@
   // joined / peer-joined / peer-left). Used to re-link the mesh when a
   // peer we depended on disappears.
   let roomRoster = new Set();
+  // Per-peer link failure counts and cooldowns, so an unreachable peer is
+  // retried with backoff instead of every heartbeat.
+  const meshLinkFailures = new Map();
+  const meshLinkCooldown = new Map();
 
   const meshInAnyRoom  = () => meshPeers.size > 0;
   const meshConnectedCount = () => {
@@ -3636,6 +3665,9 @@
       const open = e.dc && e.dc.readyState === 'open';
       if (!open && e.startedAt && now - e.startedAt > MESH_HANDSHAKE_TIMEOUT_MS) {
         console.warn('[mesh] handshake timed out, dropping', pid);
+        const fails = (meshLinkFailures.get(pid) || 0) + 1;
+        meshLinkFailures.set(pid, fails);
+        meshLinkCooldown.set(pid, now + Math.min(5 * 60000, 15000 * Math.pow(2, fails - 1)));
         meshRemoveEntry(pid);
       }
     }
@@ -3650,6 +3682,12 @@
     for (const pid of roomRoster) {
       if (pid === myRoomPeerId) continue;
       if (meshPeers.has(pid)) continue;
+      // Exponential backoff per peer. Without this, a peer we can never
+      // reach (NAT, gone but still in the roster) is retried every
+      // heartbeat forever, churning the chat with connect/disconnect noise.
+      const fails = meshLinkFailures.get(pid) || 0;
+      const until = meshLinkCooldown.get(pid) || 0;
+      if (fails && now < until) continue;
       candidates.push(pid);
     }
     if (!candidates.length) return;
@@ -3659,7 +3697,17 @@
     }
     for (const pid of candidates.slice(0, need)) {
       console.log('[mesh] linking to', pid, '(degree', active.size, '->', MESH_DEGREE + ')');
-      meshInitiate(pid).catch(e => console.warn('mesh initiate failed', pid, e));
+      // Repair runs on every peer at once (e.g. all of them see the same
+      // peer-left), so stagger the offers. Glare is handled correctly by
+      // perfect negotiation, but avoiding it is cheaper than resolving it.
+      const delay = Math.floor(Math.random() * 1200);
+      setTimeout(() => {
+        // Conditions may have changed during the delay.
+        if (!roomWS || roomWS.readyState !== 1) return;
+        if (meshPeers.has(pid)) return;
+        if (meshConnectedCount() >= MESH_DEGREE) return;
+        meshInitiate(pid).catch(e => console.warn('mesh initiate failed', pid, e));
+      }, delay);
     }
   };
 
@@ -4029,6 +4077,9 @@
       addSystem(`${meshPeerDisplayName(entry)} joined`);
       entry.lastHeardFrom = Date.now();
       entry.restartAttempts = 0;
+      // Link succeeded — forget any backoff we had for this peer.
+      meshLinkFailures.delete(entry.peerId);
+      meshLinkCooldown.delete(entry.peerId);
       startMeshHeartbeat();
       updateMeshStatus();
       updateNicknameLockUI();
@@ -4180,6 +4231,11 @@
     await roomSignal(peerId, { kind: 'offer', data: signed });
   };
 
+  // Deterministic tiebreak for offer collisions ("glare"). Both sides
+  // compute the same answer from the two peer ids, and they always get
+  // opposite roles.
+  const meshIsPolite = (peerId) => String(myRoomPeerId || '') > String(peerId);
+
   const meshAcceptOffer = async (peerId, signedOffer) => {
     const wasNew = !meshPeers.has(peerId);
     const entry = meshAddEntry(peerId, false);
@@ -4189,10 +4245,30 @@
       entry.identityFp = peerFp;
       if (peerNick) entry.nickname = peerNick;
       const offerDesc = await decodeSDP(sdpCode);
-      // setRemoteDescription can throw InvalidStateError if a re-offer
-      // arrives while signaling state isn't stable (e.g. our own offer
-      // is still in flight after a glare). The try/catch lets us roll
-      // back instead of leaving a partially-built peer.
+
+      // Perfect negotiation. Mesh repair means both peers can now offer
+      // each other at the same moment; previously only a newcomer ever
+      // initiated, so collisions were rare. On collision the impolite
+      // peer ignores the incoming offer and lets its own stand, while
+      // the polite peer rolls its offer back and answers instead. Without
+      // this, setRemoteDescription throws InvalidStateError and the whole
+      // link fails (surfacing as a bogus "wrong passcode" toast).
+      const collision = entry.pc.signalingState !== 'stable';
+      if (collision) {
+        if (!meshIsPolite(peerId)) {
+          console.warn('[mesh] offer collision with', peerId, '— impolite, ignoring theirs');
+          return;
+        }
+        console.warn('[mesh] offer collision with', peerId, '— polite, rolling back');
+        try {
+          await entry.pc.setLocalDescription({ type: 'rollback' });
+        } catch (e) {
+          // Some engines reject explicit rollback; setRemoteDescription
+          // below performs an implicit rollback on modern Chrome anyway.
+          console.warn('[mesh] rollback failed, continuing', e);
+        }
+      }
+
       await entry.pc.setRemoteDescription(offerDesc);
       entry.remoteDescSet = true;
       await meshFlushCandidates(entry);
@@ -4221,6 +4297,13 @@
       entry.identityFp = peerFp;
       if (peerNick) entry.nickname = peerNick;
       const desc = await decodeSDP(sdpCode);
+      // After a glare rollback our offer no longer exists, so a late
+      // answer to it is meaningless — applying it would throw.
+      if (entry.pc.signalingState !== 'have-local-offer') {
+        console.warn('[mesh] ignoring answer from', peerId,
+          'in state', entry.pc.signalingState);
+        return;
+      }
       await entry.pc.setRemoteDescription(desc);
       entry.remoteDescSet = true;
       await meshFlushCandidates(entry);
@@ -4546,6 +4629,8 @@
     roomIdHex = null;
     myRoomPeerId = null;
     roomRoster = new Set();
+    meshLinkFailures.clear();
+    meshLinkCooldown.clear();
     gossipResetState();
     meshClearAll();
     stopMeshHeartbeat();
@@ -4752,13 +4837,24 @@
           refreshRoomStatus();
         } else if (msg.type === 'signal') {
           if (typeof msg.from !== 'string' || typeof msg.payload !== 'string') return;
+          // Separate "can't decrypt" (genuinely a passcode/key mismatch)
+          // from "negotiation hiccup" (glare, stale answer, ICE churn).
+          // Both used to surface as "wrong passcode?", which sent people
+          // hunting a passcode problem that did not exist.
+          let payload;
           try {
-            const payload = await roomDecrypt(msg.payload);
-            await handleRoomSignal(msg.from, payload);
+            payload = await roomDecrypt(msg.payload);
           } catch (e) {
-            console.error('signal decrypt/handle failed', e);
+            console.error('signal decrypt failed', e);
             toast('Signal failed — wrong passcode?', true);
             setRoomStatus('Signal rejected — wrong passcode?', 'error');
+            return;
+          }
+          try {
+            await handleRoomSignal(msg.from, payload);
+          } catch (e) {
+            // Transient: the heartbeat and mesh repair will retry.
+            console.warn('signal handling failed (will retry)', e);
           }
         } else if (msg.type === 'error') {
           toast('Relay: ' + msg.error, true);
