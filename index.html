@@ -3634,6 +3634,9 @@
   // How long a peer entry may sit without reaching `connected` before we
   // consider the handshake dead and free the slot for a repair attempt.
   const MESH_HANDSHAKE_TIMEOUT_MS = 20000;
+  // How long a peer may stay in `disconnected` before we give up on it.
+  // Mobile network handovers routinely take longer than the old 15s.
+  const MESH_DISCONNECT_GRACE_MS = 30000;
   // Everyone the relay says is currently in the room (maintained from
   // joined / peer-joined / peer-left). Used to re-link the mesh when a
   // peer we depended on disappears.
@@ -4003,24 +4006,44 @@
         updateMeshStatus();
         updateNicknameLockUI();
       } else if (s === 'disconnected') {
-        // Transient — WebRTC may recover on its own. Nudge with an ICE
-        // restart if we're the initiator; wait a bit before giving up.
-        if (entry.outgoing && entry.remoteDescSet) {
-          entry.restartAttempts = (entry.restartAttempts || 0) + 1;
-          if (entry.restartAttempts <= 2) {
-            meshIceRestart(entry).catch(e => console.warn('iceRestart failed', e));
-          }
+        // Transient — WebRTC often recovers on its own, and a mobile
+        // network change usually resolves within a few seconds. Nudge
+        // with an ICE restart if we're the initiator, but only spend a
+        // retry when signaling is actually available.
+        if (entry.outgoing && entry.remoteDescSet && (entry.restartAttempts || 0) < 2) {
+          meshIceRestart(entry).then(sent => {
+            if (sent) entry.restartAttempts = (entry.restartAttempts || 0) + 1;
+          }).catch(e => console.warn('iceRestart failed', e));
         }
         setTimeout(() => {
           if (!meshPeers.has(entry.peerId)) return;
-          if (entry.pc && entry.pc.connectionState === 'disconnected') {
-            addSystem(`${meshPeerDisplayName(entry)} unreachable — dropping`);
-            meshRemoveEntry(entry.peerId);
-            updateNicknameLockUI();
+          if (!entry.pc || entry.pc.connectionState !== 'disconnected') return;
+          // Don't declare the peer gone while we're still cut off from the
+          // relay — we haven't had a fair chance to repair the link, and
+          // dropping now guarantees a visible disconnect on every blip.
+          if (!roomWS || roomWS.readyState !== 1) {
+            entry.pendingIceRestart = true;
+            return;
           }
-        }, 15000);
+          addSystem(`${meshPeerDisplayName(entry)} unreachable — dropping`);
+          meshRemoveEntry(entry.peerId);
+          updateNicknameLockUI();
+        }, MESH_DISCONNECT_GRACE_MS);
       } else if (s === 'failed' || s === 'closed') {
         if (meshPeers.has(entry.peerId)) {
+          // 'failed' is recoverable via ICE restart; only give up if we
+          // have signaling and have already spent our retries.
+          if (s === 'failed' && entry.outgoing && entry.remoteDescSet &&
+              (entry.restartAttempts || 0) < 2) {
+            meshIceRestart(entry).then(sent => {
+              if (sent) entry.restartAttempts = (entry.restartAttempts || 0) + 1;
+            }).catch(() => {});
+            return;
+          }
+          if (s === 'failed' && (!roomWS || roomWS.readyState !== 1)) {
+            entry.pendingIceRestart = true;
+            return; // offline — wait for the relay before writing it off
+          }
           addSystem(`${meshPeerDisplayName(entry)} disconnected`);
           meshRemoveEntry(entry.peerId);
           updateNicknameLockUI();
@@ -4071,12 +4094,32 @@
     channel.bufferedAmountLowThreshold = 256 * 1024;
 
     channel.onopen = () => {
+      // A peer that reconnected to the relay returns under a new peerId,
+      // so we can end up with two entries — and two live channels — for
+      // the same person. Identity fingerprints are stable across
+      // reconnects, so use them to retire the older duplicate.
+      if (entry.identityFp) {
+        for (const [pid, other] of Array.from(meshPeers)) {
+          if (pid === entry.peerId || other.identityFp !== entry.identityFp) continue;
+          console.log('[mesh] duplicate link to', entry.identityFp,
+            '— dropping older entry', pid);
+          other.supersededBy = entry.peerId;
+          meshRemoveEntry(pid);
+        }
+      }
       els.emptyState?.remove();
       enableComposer();
       setMobileView('chat');
-      addSystem(`${meshPeerDisplayName(entry)} joined`);
+      // Only announce a genuinely new participant, not a peer that just
+      // re-established its link after a network blip.
+      if (!entry.announced) {
+        entry.announced = true;
+        addSystem(`${meshPeerDisplayName(entry)} joined`);
+      }
       entry.lastHeardFrom = Date.now();
       entry.restartAttempts = 0;
+      entry.pendingIceRestart = false;
+      entry.relayGone = false;
       // Link succeeded — forget any backoff we had for this peer.
       meshLinkFailures.delete(entry.peerId);
       meshLinkCooldown.delete(entry.peerId);
@@ -4123,16 +4166,43 @@
 
   // Initiator side: redo the offer with iceRestart so the peer pair
   // re-gathers candidates and finds a new path.
+  // Returns false when the restart could not even be attempted because
+  // signaling is down — the caller must not burn a retry on that.
   const meshIceRestart = async (entry) => {
-    if (!entry.pc || !entry.outgoing) return;
+    if (!entry.pc || !entry.outgoing) return false;
+    // An ICE restart has to travel over the relay. On mobile the network
+    // change that broke the peer connection usually took the relay socket
+    // with it, so attempting now would silently do nothing and waste one
+    // of the two allowed attempts.
+    if (!roomWS || roomWS.readyState !== 1) {
+      entry.pendingIceRestart = true;
+      return false;
+    }
     try {
       const offer = await entry.pc.createOffer({ iceRestart: true });
       await entry.pc.setLocalDescription(offer);
       const sdpCode = await encodeSDP(entry.pc.localDescription);
       const signed = await buildSignedHandshake(sdpCode);
       await roomSignal(entry.peerId, { kind: 'offer', data: signed });
+      entry.pendingIceRestart = false;
       addSystem(`Reconnecting to ${meshPeerDisplayName(entry)}…`);
-    } catch (e) { console.warn('meshIceRestart failed', e); }
+      return true;
+    } catch (e) { console.warn('meshIceRestart failed', e); return false; }
+  };
+
+  // Once the relay is reachable again, retry restarts we had to defer.
+  const meshFlushPendingIceRestarts = () => {
+    if (!roomWS || roomWS.readyState !== 1) return;
+    for (const [, e] of meshPeers) {
+      if (!e.pendingIceRestart) continue;
+      const st = e.pc && e.pc.connectionState;
+      if (st === 'disconnected' || st === 'failed') {
+        e.restartAttempts = 0; // signaling is back; give it a fresh budget
+        meshIceRestart(e).catch(err => console.warn('deferred restart failed', err));
+      } else {
+        e.pendingIceRestart = false;
+      }
+    }
   };
 
   // Attach the microphone to connections that were negotiated before the
@@ -4208,8 +4278,10 @@
           }
         }
       }
-      // Periodic safety net: reap dead handshakes and re-link if the
-      // room grew or a neighbour vanished without a peer-left notice.
+      // Periodic safety net: retry deferred repairs, reap dead handshakes
+      // and re-link if the room grew or a neighbour vanished without a
+      // peer-left notice.
+      meshFlushPendingIceRestarts();
       meshEnsureDegree();
       prunePendingChunks();
     }, 10000);
@@ -4763,6 +4835,10 @@
         if (settled) return; settled = true;
         ws.send(JSON.stringify({ type: 'join', room: roomIdHex }));
         updateNicknameLockUI();
+        // Signaling is back: retry any ICE restarts we had to defer while
+        // offline, before the disconnect grace timers give up on peers we
+        // could still recover.
+        setTimeout(meshFlushPendingIceRestarts, 500);
         resolve();
       };
       ws.onerror = () => onFail(new Error('relay error'));
@@ -4827,6 +4903,18 @@
           if (typeof msg.peerId !== 'string') return;
           roomRoster.delete(msg.peerId);
           const entry = meshPeers.get(msg.peerId);
+          // A peer whose relay socket dropped is announced as "left" and
+          // comes back under a NEW peerId. Our direct data channel to them
+          // is unaffected — it does not run over the relay. Tearing it down
+          // here is what produced a visible disconnect on every blip, so
+          // keep any channel that is still open and let WebRTC decide.
+          if (entry && entry.dc && entry.dc.readyState === 'open') {
+            console.log('[mesh] relay says', msg.peerId,
+              'left but our channel is open — keeping it');
+            entry.relayGone = true;
+            refreshRoomStatus();
+            return;
+          }
           const name = entry ? meshPeerDisplayName(entry) : 'peer';
           const wasKnown = !!entry;
           meshRemoveEntry(msg.peerId);
