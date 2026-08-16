@@ -111,8 +111,56 @@ public class CipherApp extends Application {
         try { nm.notify(id, b.build()); } catch (Exception ignored) {}
     }
 
+    /**
+     * Route call audio like a phone: MODE_IN_COMMUNICATION + earpiece by
+     * default, loudspeaker only when the user toggles it. Runs on the
+     * main thread because JS-interface calls arrive on a WebView thread.
+     */
+    private void applyCallAudio(final boolean inCall, final boolean speakerOn) {
+        main.post(new Runnable() {
+            @Override public void run() {
+                try {
+                    android.media.AudioManager am =
+                            (android.media.AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                    if (inCall) {
+                        am.setMode(android.media.AudioManager.MODE_IN_COMMUNICATION);
+                        if (Build.VERSION.SDK_INT >= 31) {
+                            if (speakerOn) {
+                                for (android.media.AudioDeviceInfo d : am.getAvailableCommunicationDevices()) {
+                                    if (d.getType() == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                                        am.setCommunicationDevice(d);
+                                        break;
+                                    }
+                                }
+                            } else {
+                                am.clearCommunicationDevice(); // default = earpiece/headset
+                            }
+                        } else {
+                            am.setSpeakerphoneOn(speakerOn);
+                        }
+                    } else {
+                        if (Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice();
+                        else am.setSpeakerphoneOn(false);
+                        am.setMode(android.media.AudioManager.MODE_NORMAL);
+                    }
+                } catch (Exception ignored) {}
+            }
+        });
+    }
+
     /** Called from the page (guarded `window.CipherNative` hooks in index.html). */
     private class NativeBridge {
+        @JavascriptInterface
+        public void setCallAudio(boolean inCall) {
+            // Entering a call defaults to the earpiece (speaker off).
+            applyCallAudio(inCall, false);
+        }
+
+        @JavascriptInterface
+        public void setSpeaker(boolean on) {
+            applyCallAudio(true, on);
+        }
+
         @JavascriptInterface
         public void onMessage(String sender, String body) {
             String preview = body == null ? "" : (body.length() > 80 ? body.substring(0, 80) + "…" : body);

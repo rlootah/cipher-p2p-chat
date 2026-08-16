@@ -809,6 +809,11 @@
         <span class="lvl" id="callLevel">
           <span></span><span></span><span></span><span></span><span></span>
         </span>
+        <!-- Speaker/earpiece toggle — only rendered inside the Android app
+             (window.CipherNative), where call audio defaults to the earpiece. -->
+        <button class="call-btn mute" id="btnSpeaker" title="Speaker on/off" style="display:none;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+        </button>
         <button class="call-btn mute" id="btnMute" title="Mute" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
         </button>
@@ -1062,6 +1067,7 @@
     callLevel:     $('callLevel'),
     btnCall:       $('btnCall'),
     btnMute:       $('btnMute'),
+    btnSpeaker:    $('btnSpeaker'),
     callBanner:    $('callBanner'),
     btnAcceptCall: $('btnAcceptCall'),
     btnDeclineCall:$('btnDeclineCall'),
@@ -2657,11 +2663,33 @@
 
   /* ── VOICE CALL CONTROLS ──────────────────────────────────── */
 
+  // Android wrapper: route call audio like a phone call. Earpiece by
+  // default when a call starts; the speaker button toggles loudspeaker.
+  // No-ops in normal browsers (no window.CipherNative, button hidden).
+  let speakerOn = false;
+  let nativeCallAudioActive = false;
+  const syncNativeCallAudio = (active) => {
+    if (!window.CipherNative) return;
+    if (active === nativeCallAudioActive) return;
+    nativeCallAudioActive = active;
+    speakerOn = false; // every call starts on the earpiece
+    try { window.CipherNative.setCallAudio(active); } catch {}
+  };
+  const updateSpeakerBtn = () => {
+    if (!els.btnSpeaker) return;
+    const show = !!window.CipherNative && inCall;
+    els.btnSpeaker.style.display = show ? 'flex' : 'none';
+    els.btnSpeaker.classList.toggle('muted', speakerOn); // green = speaker on
+    els.btnSpeaker.title = speakerOn ? 'Switch to earpiece' : 'Switch to speaker';
+  };
+
   const updateCallUI = () => {
     const dcOpen = dc && dc.readyState === 'open';
     const meshOpen = meshConnectedCount() > 0;
     if (!dcOpen && !meshOpen) {
       els.callPill.style.display = 'none';
+      syncNativeCallAudio(false);
+      updateSpeakerBtn();
       return;
     }
     els.callPill.style.display = 'flex';
@@ -2684,6 +2712,8 @@
       els.btnCall.disabled = !micStream;
       els.btnMute.disabled = true;
     }
+    syncNativeCallAudio(!!inCall);
+    updateSpeakerBtn();
   };
 
   // Audio level meter — visualize either local mic (when muted=false) or
@@ -2856,6 +2886,15 @@
     }
   });
   els.btnMute.addEventListener('click', toggleMute);
+  if (els.btnSpeaker) {
+    els.btnSpeaker.addEventListener('click', () => {
+      if (!window.CipherNative || !inCall) return;
+      speakerOn = !speakerOn;
+      try { window.CipherNative.setSpeaker(speakerOn); } catch {}
+      updateSpeakerBtn();
+      toast(speakerOn ? 'Speaker on' : 'Earpiece');
+    });
+  }
   els.btnAcceptCall.addEventListener('click', () => {
     if (meshInAnyRoom()) {
       els.callBanner.classList.remove('show');
